@@ -2,6 +2,17 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.19] - 2026-08-04
+
+### Fixed
+- **macOS build failed to launch with "Cannot find native binding"** — the mac release packages
+  both Intel (x64) and Apple Silicon (arm64) builds from a single CI runner, but the canvas library
+  used for rendering (`@napi-rs/canvas`) ships a separate native binary per architecture, and npm
+  only installs the one matching the runner's own arch. Whichever architecture didn't match the
+  runner ended up packaged with no native binary at all, and the app crashed on launch on that
+  arch. CI now force-installs both architectures' binaries before packaging, so both mac builds
+  ship with a working binary regardless of which arch actually builds them.
+
 ## [0.1.18] - 2026-07-23
 
 ### Added

@@ -33,6 +33,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # @napi-rs/canvas ships one npm package per platform+arch (e.g. @napi-rs/canvas-darwin-arm64),
+      # and npm's optional-dependency resolution only installs the ONE matching the machine `npm ci`
+      # ran on. But electron-builder's mac target here packages BOTH x64 and arm64 from this single
+      # runner -- so whichever arch doesn't match this runner ships with no native binding at all,
+      # and the app throws "Cannot find native binding" at startup on that arch. Force-install both
+      # darwin variants (at the version @napi-rs/canvas itself resolved to) so both mac targets get
+      # a working binary regardless of which arch this runner happens to be.
+      - name: Ensure both macOS canvas native bindings are present
+        if: matrix.os == 'macos-latest'
+        run: |
+          CANVAS_VERSION=$(node -p "require('./node_modules/@napi-rs/canvas/package.json').version")
+          npm install --no-save --force "@napi-rs/canvas-darwin-x64@$CANVAS_VERSION" "@napi-rs/canvas-darwin-arm64@$CANVAS_VERSION"
+
       - name: Typecheck
         run: npm run typecheck
 
