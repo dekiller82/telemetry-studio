@@ -2,6 +2,17 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.20] - 2026-08-04
+
+### Fixed
+- **In-app update failed with a 404 on Windows and Linux** — the installer/AppImage filename is
+  derived from the app's display name ("Telemetry Studio"), which contains a space. That one space
+  got sanitized two different, incompatible ways: electron-builder's own update-metadata file
+  recorded it as a hyphen, while GitHub's release-asset upload recorded it as a dot, so the
+  in-app updater downloaded a URL that never matched an actual asset. The installer/AppImage
+  filenames no longer derive from the display name, so there's no space left for either side to
+  mangle differently.
+
 ## [0.1.19] - 2026-08-04
 
 ### Fixed

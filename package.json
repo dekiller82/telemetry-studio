@@ -1,6 +1,6 @@
 {
   "name": "telemetry-studio",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Customizable motorsport telemetry overlay editor and exporter for GoPro footage",
   "main": "./out/main/index.js",
   "author": "dekiller82 <erenerikaydogan@gmail.com>",
@@ -103,7 +103,14 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Telemetry-Studio-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Telemetry-Studio-${version}.${ext}"
+    },
+    "appImage": {
+      "artifactName": "Telemetry-Studio-${version}.${ext}"
     },
     "mac": {
       "icon": "build/icon.png",
