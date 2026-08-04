@@ -13,6 +13,8 @@ All notable changes to Telemetry Studio are documented here.
   independent of and unrelated to the new VideoToolbox change in the last release. Each
   architecture is now packaged as its own pass with the correct binary swapped in first.
 
+## [0.1.21] - 2026-08-04
+
 ### Added
 - **GPU-accelerated export on macOS (Apple VideoToolbox)** — exports on Mac were silently falling
   back to CPU encoding, since the encoder selection list only knew about NVIDIA/Intel/AMD GPUs,
