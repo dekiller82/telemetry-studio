@@ -59,7 +59,32 @@ jobs:
       # skipped with "existing type not compatible with publishing type". Building artifacts here and
       # publishing them all in one place (the `publish` job below) avoids that race entirely.
       - name: Package
+        if: matrix.os != 'macos-latest'
         run: npm run ${{ matrix.script }}
+
+      # Unlike ffprobe-static (which bundles every platform+arch binary in the npm package itself
+      # and picks one at runtime), ffmpeg-static downloads exactly ONE binary at `npm ci` time,
+      # matching whichever machine ran it -- there is no arm64/x64 split package to force-install
+      # both of the way the canvas step above does. So a single combined `electron-builder --mac`
+      # run here would stamp the SAME single-arch ffmpeg binary into both the x64 and the arm64
+      # package (confirmed for real: both zips from a past release contained the byte-identical
+      # arm64-only binary, since this runner is arm64 -- Intel Macs can't execute that at all, no
+      # Rosetta path runs arm64-on-x64). Fixed by packaging each arch as its own pass, swapping in
+      # the matching ffmpeg-static binary before each.
+      - name: Package (macOS arm64)
+        if: matrix.os == 'macos-latest'
+        run: |
+          npm run build
+          rm -f node_modules/ffmpeg-static/ffmpeg
+          npm_config_arch=arm64 npm_config_platform=darwin node node_modules/ffmpeg-static/install.js
+          npx electron-builder --mac --arm64 --publish never
+
+      - name: Package (macOS x64)
+        if: matrix.os == 'macos-latest'
+        run: |
+          rm -f node_modules/ffmpeg-static/ffmpeg
+          npm_config_arch=x64 npm_config_platform=darwin node node_modules/ffmpeg-static/install.js
+          npx electron-builder --mac --x64 --publish never
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

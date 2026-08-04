@@ -2,7 +2,16 @@
 
 All notable changes to Telemetry Studio are documented here.
 
-## [0.1.21] - 2026-08-04
+## [0.1.22] - 2026-08-04
+
+### Fixed
+- **Export was completely broken on Intel Macs.** Both mac release builds (Intel and Apple
+  Silicon) were shipping the exact same single-architecture ffmpeg binary, because the packaging
+  step downloads one binary matching whichever machine builds it and had no way to tell it needed
+  both. On this project's build machine that meant an Apple-Silicon-only binary got bundled into
+  the Intel build too, and Intel Macs can't run it at all — export would have failed outright,
+  independent of and unrelated to the new VideoToolbox change in the last release. Each
+  architecture is now packaged as its own pass with the correct binary swapped in first.
 
 ### Added
 - **GPU-accelerated export on macOS (Apple VideoToolbox)** — exports on Mac were silently falling
