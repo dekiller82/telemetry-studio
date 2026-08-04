@@ -2,6 +2,17 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.21] - 2026-08-04
+
+### Added
+- **GPU-accelerated export on macOS (Apple VideoToolbox)** — exports on Mac were silently falling
+  back to CPU encoding, since the encoder selection list only knew about NVIDIA/Intel/AMD GPUs,
+  none of which exist on Apple Silicon. Added VideoToolbox as a candidate, tried before falling
+  back to CPU, following the same "verify with a real throwaway ffmpeg run before trusting it"
+  approach as every other encoder here. **Not yet verified on real Apple Silicon hardware** — if
+  export behaves worse than before on Mac after updating, that's the first thing to suspect;
+  reports welcome.
+
 ## [0.1.20] - 2026-08-04
 
 ### Fixed

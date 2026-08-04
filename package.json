@@ -1,6 +1,6 @@
 {
   "name": "telemetry-studio",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Customizable motorsport telemetry overlay editor and exporter for GoPro footage",
   "main": "./out/main/index.js",
   "author": "dekiller82 <erenerikaydogan@gmail.com>",

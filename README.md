@@ -232,7 +232,15 @@ Export runs everything through ffmpeg. On startup of each export, `selectVideoEn
    pairing is platform-specific (`d3d11va` on Windows, `vaapi` on Linux) and untested on real AMD
    hardware, so rather than guess a flag that could break the export outright, only the encode step
    is GPU-accelerated for AMD today.
-4. **CPU** (`libx264`) — used if no GPU encoder is available, and as an automatic mid-export
+4. **Apple VideoToolbox** (`h264_videotoolbox`, macOS) — encode always attempted; GPU-accelerated
+   decode (`-hwaccel videotoolbox`) is enabled only after its own real roundtrip probe passes, same
+   treatment as Quick Sync above. **Newest and least-tested candidate here** — there's no Apple
+   Silicon machine available to verify it directly, so it's only been checked by argument-shape
+   review, not a real export on real Mac hardware. It's still fully covered by the "verify before
+   trusting" smoke test below, so a machine where it doesn't actually work should just fall through
+   to CPU rather than break the export outright — but if you hit an export failure on Mac after this
+   change, that's the first thing to suspect.
+5. **CPU** (`libx264`) — used if no GPU encoder is available, and as an automatic mid-export
    fallback if a GPU encoder that passed its startup smoke test still fails on the real export.
 
 Every candidate is verified with a real, throwaway ffmpeg run before being trusted — nothing here
@@ -262,6 +270,12 @@ renderer use identically.
 
 ## Known limitations
 
+- **360° footage isn't supported yet.** The app assumes a flat rectilinear video frame; a raw 360
+  file will import but won't be reprojected, so widgets will overlay on the unwrapped/fisheye
+  source instead of a normal-looking view. I don't own a 360 camera to test against, so this hasn't
+  been built. If you've got 360 GoPro footage (Max, or a Hero with a Max Lens Mod) and are willing
+  to send me a sample clip, I'd like to take a shot at supporting it properly — open an issue on the
+  repo and we can figure out how to get a file to me.
 - **IMU axis calibration** (used by the G-Force and Roll/Lean widgets) is auto-detected per import
   by correlating accelerometer data against GPS-derived acceleration — it needs at least some
   braking/accelerating events in the clip to calibrate reliably. A manual axis override is

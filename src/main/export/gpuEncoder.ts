@@ -82,6 +82,27 @@ const GPU_ENCODER_CANDIDATES: VideoEncoder[] = [
     // No decodeHwaccel probe here: AMD's decode hwaccel pairing is platform-dependent (d3d11va on
     // Windows, vaapi on Linux) and untested on any real AMD machine. Encode-only GPU acceleration
     // is still a real win; guessing the wrong decode flag would risk breaking the export outright.
+  },
+  {
+    codec: 'h264_videotoolbox',
+    label: 'Apple VideoToolbox',
+    // VideoToolbox has no CRF-equivalent constant-quality mode; ffmpeg exposes its quality target
+    // as -q:v on a 1(worst)-100(best) scale -- opposite direction from x264's CRF (0 best-51 worst)
+    // and a different underlying metric, so this is a reasonable linear approximation, not a true
+    // equivalent (this app's default CRF of 18 lands at -q:v 65, in line with commonly-cited
+    // "good quality" VideoToolbox values, which is a useful sanity check but not a guarantee).
+    qualityArgs: (crf) => ['-q:v', String(Math.round(Math.max(1, Math.min(100, ((51 - crf) / 51) * 100))))],
+    bitrateArgs: (kbps) => [
+      '-b:v',
+      `${kbps}k`,
+      '-maxrate',
+      `${Math.round(kbps * BITRATE_MAXRATE_MULTIPLIER)}k`,
+      '-bufsize',
+      `${Math.round(kbps * BITRATE_BUFSIZE_MULTIPLIER)}k`
+    ]
+    // No unconditional decodeHwaccel here, unlike NVENC/cuda -- there's no Apple Silicon machine
+    // available to have verified that pairing directly, so -hwaccel videotoolbox is only trusted
+    // after its own real roundtrip probe passes (same treatment as QSV below), not assumed.
   }
 ]
 
@@ -199,11 +220,14 @@ export async function selectVideoEncoder(ffmpegBin: string, preferGpu = true): P
     try {
       if (!(await testEncoder(ffmpegBin, candidate))) continue
 
-      // Intel Quick Sync's decode hwaccel isn't verified on any real Intel machine (unlike NVENC's
-      // cuda pairing above), so it's only trusted after its own real roundtrip probe passes.
-      if (candidate.codec === 'h264_qsv') {
-        const decodeOk = await testDecodeHwaccel(ffmpegBin, 'qsv', candidate).catch(() => false)
-        return decodeOk ? { ...candidate, decodeHwaccel: 'qsv' } : candidate
+      // Intel Quick Sync's and Apple VideoToolbox's decode hwaccel aren't verified on any real
+      // machine of their kind (unlike NVENC's cuda pairing above), so each is only trusted after
+      // its own real roundtrip probe passes.
+      const unverifiedDecodeHwaccel: Record<string, string> = { h264_qsv: 'qsv', h264_videotoolbox: 'videotoolbox' }
+      const probeHwaccel = unverifiedDecodeHwaccel[candidate.codec]
+      if (probeHwaccel) {
+        const decodeOk = await testDecodeHwaccel(ffmpegBin, probeHwaccel, candidate).catch(() => false)
+        return decodeOk ? { ...candidate, decodeHwaccel: probeHwaccel } : candidate
       }
 
       return candidate
