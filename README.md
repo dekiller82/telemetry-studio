@@ -197,6 +197,22 @@ Download the installer for your platform from the
 - **macOS** — `.dmg`
 - **Linux** — `.AppImage` or `.deb`
 
+### macOS: "is damaged and can't be opened"
+
+This app isn't signed with a paid Apple Developer ID (see [GPU acceleration](#gpu-acceleration) and
+the in-app update section above for why that also limits auto-update to Windows/Linux), so macOS
+Gatekeeper blocks it after downloading with a message claiming the file is damaged — it isn't;
+that's Gatekeeper's generic rejection for anything from an unidentified developer with no
+workaround button in newer macOS versions. Fix it from Terminal after moving the app to
+`/Applications`:
+
+```bash
+xattr -cr "/Applications/Telemetry Studio.app"
+```
+
+That clears the quarantine flag Gatekeeper attaches to anything downloaded from the internet; it
+should then open normally (including future updates you download the same way).
+
 ## Development
 
 ```bash

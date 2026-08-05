@@ -2,6 +2,22 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.23] - 2026-08-04
+
+### Fixed
+- **VideoToolbox export silently fell back to CPU on real Apple Silicon hardware.** Confirmed by
+  a real tester and by extracting the actual mac binary from a shipped release: ffmpeg-static
+  bundles ffmpeg 6.0 for macOS, and the quality-mode flag (`-q:v`) the previous release used for
+  VideoToolbox wasn't added until ffmpeg 6.1 — the startup smoke test correctly detected this
+  didn't work and fell back to CPU exactly as designed, it just meant the GPU path never actually
+  ran. Switched to plain bitrate-mode rate control instead, which VideoToolbox has supported since
+  ffmpeg first wrapped it.
+- **Documented the macOS "is damaged and can't be opened" Gatekeeper message** — this app isn't
+  signed with a paid Apple Developer ID, and recent macOS versions show this (misleading) message
+  instead of an "unidentified developer" bypass button. See the README's
+  [Installing](README.md#macos-is-damaged-and-cant-be-opened) section for the one-line Terminal
+  fix (`xattr -cr`).
+
 ## [0.1.22] - 2026-08-04
 
 ### Fixed

@@ -226,7 +226,10 @@ function buildFfmpegArgs(
   ]
   if (audioMapLabel) args.push('-map', audioMapLabel)
   args.push('-frames:v', String(totalFrames))
-  const videoRateControlArgs = settings.videoBitrateKbps != null ? encoder.bitrateArgs(settings.videoBitrateKbps) : encoder.qualityArgs(settings.crf)
+  const videoRateControlArgs =
+    settings.videoBitrateKbps != null
+      ? encoder.bitrateArgs(settings.videoBitrateKbps)
+      : encoder.qualityArgs(settings.crf, settings.width, settings.height, settings.fps)
   args.push('-c:v', encoder.codec, ...videoRateControlArgs, '-pix_fmt', 'yuv420p', ...audioCodecArgs, outputPath)
   return args
 }

@@ -13,8 +13,11 @@ const BITRATE_BUFSIZE_MULTIPLIER = 2
 
 export interface VideoEncoder {
   codec: string
-  /** Quality/rate-control flags for this encoder; CRF isn't universal across GPU encoders. */
-  qualityArgs: (crf: number) => string[]
+  /** Quality/rate-control flags for this encoder; CRF isn't universal across GPU encoders.
+   *  width/height/fps are only used by encoders with no real constant-quality mode of their own
+   *  (VideoToolbox -- see below), to derive a resolution-aware bitrate instead; every other
+   *  encoder here ignores them. */
+  qualityArgs: (crf: number, width: number, height: number, fps: number) => string[]
   /** Target-bitrate rate-control flags (delivery presets, e.g. "YouTube 1080p") -- a different
    *  rate-control mode from qualityArgs above, not just a different number; mutually exclusive
    *  with it in a single ffmpeg invocation. */
@@ -33,7 +36,7 @@ const GPU_ENCODER_CANDIDATES: VideoEncoder[] = [
   {
     codec: 'h264_nvenc',
     label: 'NVIDIA NVENC',
-    qualityArgs: (crf) => ['-preset', 'p5', '-rc', 'vbr', '-cq', String(crf), '-b:v', '0'],
+    qualityArgs: (crf) => ['-preset', 'p5', '-rc', 'vbr', '-cq', String(crf), '-b:v', '0'], // width/height/fps unused: NVENC has its own real constant-quality mode (-cq)
     bitrateArgs: (kbps) => [
       '-preset',
       'p5',
@@ -86,12 +89,29 @@ const GPU_ENCODER_CANDIDATES: VideoEncoder[] = [
   {
     codec: 'h264_videotoolbox',
     label: 'Apple VideoToolbox',
-    // VideoToolbox has no CRF-equivalent constant-quality mode; ffmpeg exposes its quality target
-    // as -q:v on a 1(worst)-100(best) scale -- opposite direction from x264's CRF (0 best-51 worst)
-    // and a different underlying metric, so this is a reasonable linear approximation, not a true
-    // equivalent (this app's default CRF of 18 lands at -q:v 65, in line with commonly-cited
-    // "good quality" VideoToolbox values, which is a useful sanity check but not a guarantee).
-    qualityArgs: (crf) => ['-q:v', String(Math.round(Math.max(1, Math.min(100, ((51 - crf) / 51) * 100))))],
+    // VideoToolbox's ffmpeg quality mode (-q:v, added for the 6.1 dev cycle) isn't in the ffmpeg
+    // version ffmpeg-static actually bundles for macOS -- confirmed directly by extracting the real
+    // mac binary from a shipped release and checking: it self-reports "FFmpeg version 6.0", and a
+    // real Apple Silicon tester saw export silently fall back to CPU, meaning testEncoder's smoke
+    // test genuinely failed with -q:v, exactly as this app is designed to react to an encoder that
+    // doesn't actually work -- not a false negative, a real one. Falls back to plain bitrate mode
+    // instead, which VideoToolbox has supported since ffmpeg first wrapped it (macOS 10.8+), using a
+    // bits-per-pixel estimate from CRF: x264's own rule of thumb is roughly half the bitrate per +6
+    // CRF, anchored so CRF 18 (this app's default) lands well above the YouTube-1080p delivery
+    // preset's cited 8 Mbps target (a lower-quality target than the default "source quality" export
+    // is meant to be) -- an approximation once removed from CRF's real meaning, same as -q:v was.
+    qualityArgs: (crf, width, height, fps) => {
+      const bpp = 0.14 * Math.pow(2, (23 - crf) / 6)
+      const kbps = Math.max(1000, Math.round((width * height * fps * bpp) / 1000))
+      return [
+        '-b:v',
+        `${kbps}k`,
+        '-maxrate',
+        `${Math.round(kbps * BITRATE_MAXRATE_MULTIPLIER)}k`,
+        '-bufsize',
+        `${Math.round(kbps * BITRATE_BUFSIZE_MULTIPLIER)}k`
+      ]
+    },
     bitrateArgs: (kbps) => [
       '-b:v',
       `${kbps}k`,
@@ -156,7 +176,7 @@ function testEncoder(ffmpegBin: string, encoder: VideoEncoder): Promise<boolean>
     'color=black:size=256x256:rate=5:duration=0.4',
     '-c:v',
     encoder.codec,
-    ...encoder.qualityArgs(23),
+    ...encoder.qualityArgs(23, 256, 256, 5),
     '-frames:v',
     '2',
     '-f',
@@ -198,7 +218,7 @@ async function testDecodeHwaccel(ffmpegBin: string, hwaccel: string, encoder: Vi
       sourcePath,
       '-c:v',
       encoder.codec,
-      ...encoder.qualityArgs(23),
+      ...encoder.qualityArgs(23, 256, 256, 5),
       '-frames:v',
       '2',
       '-f',
