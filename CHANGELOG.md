@@ -15,7 +15,7 @@ All notable changes to Telemetry Studio are documented here.
 - **Documented the macOS "is damaged and can't be opened" Gatekeeper message** — this app isn't
   signed with a paid Apple Developer ID, and recent macOS versions show this (misleading) message
   instead of an "unidentified developer" bypass button. See the README's
-  [Installing](README.md#macos-is-damaged-and-cant-be-opened) section for the one-line Terminal
+  [Installing](README.md#macos-install-steps) section for the one-line Terminal
   fix (`xattr -cr`).
 
 ## [0.1.22] - 2026-08-04
