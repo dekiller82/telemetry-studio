@@ -18,9 +18,20 @@ export interface GpsTelemetryResult {
   videoDurationMs: number
 }
 
+/** Placeholder deviceName used when a clip has no usable GPS of its own -- e.g. the first chapter
+ *  of a multi-chapter recording, started before the GPS module acquired a lock. stitchClips.ts
+ *  prefers a real device name from whichever clip actually has one. */
+const NO_FIX_DEVICE_NAME = 'No GPS fix'
+
 /**
  * gopro-telemetry with `stream: 'GPS'` yields either a GPS5 or GPS9 stream per
  * device. Both share the same first 5 value indices: lat, lon, alt, speed2D, speed3D.
+ *
+ * Returns zero samples (never throws) when THIS clip has no usable GPS -- most commonly the first
+ * chapter of a recording, started before the GPS module locked. A multi-clip import must not be
+ * rejected outright just because one chapter has no fix yet; buildImportResult decides whether the
+ * WHOLE session (every clip stitched together) has zero usable GPS, which is the only case that
+ * should actually fail the import.
  */
 export function normalizeGpsTelemetry(raw: RawGoProTelemetry, videoDurationMs: number): GpsTelemetryResult {
   for (const key of Object.keys(raw)) {
@@ -63,9 +74,7 @@ export function normalizeGpsTelemetry(raw: RawGoProTelemetry, videoDurationMs: n
     }
   }
 
-  throw new Error(
-    'No usable GPS telemetry found in this clip. Make sure GPS was enabled and had a signal lock while recording (indoor tracks or covered areas often have no GPS signal).'
-  )
+  return { deviceName: NO_FIX_DEVICE_NAME, gpsStream: 'GPS5', samples: [], videoDurationMs }
 }
 
 export interface ImuTelemetryResult {

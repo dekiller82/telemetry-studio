@@ -44,9 +44,14 @@ export function stitchClipTelemetry(clips: ClipTelemetryInput[]): TelemetryData 
     offsetMs += clip.durationMs
   }
 
+  // A clip with no usable GPS of its own (see normalize.ts's normalizeGpsTelemetry) reports a
+  // placeholder deviceName/gpsStream -- prefer whichever clip actually has real GPS for this
+  // session-wide metadata instead of blindly trusting clips[0].
+  const metadataSource = clips.find((c) => c.telemetry.samples.length > 0) ?? clips[0]
+
   return {
-    deviceName: clips[0].telemetry.deviceName,
-    gpsStream: clips[0].telemetry.gpsStream,
+    deviceName: metadataSource.telemetry.deviceName,
+    gpsStream: metadataSource.telemetry.gpsStream,
     samples,
     videoDurationMs: offsetMs,
     accel: stitchImuSamples(clips, (t) => t.accel),

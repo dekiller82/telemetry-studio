@@ -96,19 +96,21 @@ describe('normalizeGpsTelemetry', () => {
   // Confirmed against a real clip whose GPS module never acquired a lock for its entire ~4.8min
   // duration: gopro-telemetry still returns a structurally valid GPS5 stream, but every sample's
   // lat/lon is exactly (0, 0) -- GoPro's own convention for "no fix yet". Before this fix, that
-  // silently produced a "successful" import with a degenerate single-point track instead of the
-  // clear "no GPS" error this file already has for the totally-missing-stream case.
-  it('throws a clear error when every sample is a (0, 0) no-fix reading', () => {
-    expect(() =>
-      normalizeGpsTelemetry(
-        rawWithGps5Samples([
-          { cts: 0, value: [0, 0, -17, 0, 0] },
-          { cts: 1000, value: [0, 0, -17, 0, 0] },
-          { cts: 2000, value: [0, 0, -17, 0, 0] }
-        ]),
-        3000
-      )
-    ).toThrow(/GPS/)
+  // silently produced a "successful" import with a degenerate single-point track. This clip-level
+  // function now returns zero samples rather than throwing -- a common case for the FIRST chapter
+  // of a multi-chapter recording (GPS often hasn't locked yet when recording starts), which must
+  // not reject the whole import when later chapters have a perfectly good fix. Only
+  // clipImport.ts's buildImportResult decides the whole SESSION has no usable GPS.
+  it('returns zero samples (does not throw) when every sample is a (0, 0) no-fix reading', () => {
+    const result = normalizeGpsTelemetry(
+      rawWithGps5Samples([
+        { cts: 0, value: [0, 0, -17, 0, 0] },
+        { cts: 1000, value: [0, 0, -17, 0, 0] },
+        { cts: 2000, value: [0, 0, -17, 0, 0] }
+      ]),
+      3000
+    )
+    expect(result.samples).toHaveLength(0)
   })
 
   it('filters out only the no-fix samples when GPS lock is acquired partway through', () => {
@@ -151,7 +153,8 @@ describe('normalizeGpsTelemetry', () => {
     expect(result.deviceName).toBe('Good fix')
   })
 
-  it('throws when no GPS stream exists at all', () => {
-    expect(() => normalizeGpsTelemetry({ 1: { 'device name': 'x', streams: {} } }, 1000)).toThrow(/GPS/)
+  it('returns zero samples (does not throw) when no GPS stream exists at all', () => {
+    const result = normalizeGpsTelemetry({ 1: { 'device name': 'x', streams: {} } }, 1000)
+    expect(result.samples).toHaveLength(0)
   })
 })

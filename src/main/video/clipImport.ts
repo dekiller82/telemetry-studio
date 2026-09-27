@@ -58,6 +58,17 @@ export function buildImportResult(probed: ProbedClip[]): ImportResult {
   }
 
   const telemetry = stitchClipTelemetry(probed.map((p) => ({ telemetry: p.telemetry, durationMs: p.video.durationMs })))
+
+  // A single clip with no fix yet (e.g. the first chapter of a recording, started before GPS
+  // locked) contributes zero samples but shouldn't fail the whole import -- see
+  // normalizeGpsTelemetry's own doc comment. Only reject here, once every clip has been stitched
+  // together, if the ENTIRE session has no usable GPS anywhere.
+  if (telemetry.samples.length === 0) {
+    throw new Error(
+      'No usable GPS telemetry found in any selected clip. Make sure GPS was enabled and had a signal lock while recording (indoor tracks or covered areas often have no GPS signal).'
+    )
+  }
+
   return { clips, telemetry }
 }
 

@@ -53,6 +53,19 @@ describe('stitchClipTelemetry', () => {
     expect(stitched.gpsStream).toBe('GPS9')
   })
 
+  it('prefers deviceName/gpsStream from the first clip that actually has GPS samples', () => {
+    // The first chapter of a recording often has no GPS fix yet -- normalizeGpsTelemetry reports
+    // that as a placeholder deviceName with zero samples rather than throwing (see normalize.ts).
+    const noFixClip = makeTelemetry([], { deviceName: 'No GPS fix', gpsStream: 'GPS5' })
+    const clip2 = makeTelemetry([0], { deviceName: 'Hero11 Black', gpsStream: 'GPS9' })
+    const stitched = stitchClipTelemetry([
+      { telemetry: noFixClip, durationMs: 1000 },
+      { telemetry: clip2, durationMs: 1000 }
+    ])
+    expect(stitched.deviceName).toBe('Hero11 Black')
+    expect(stitched.gpsStream).toBe('GPS9')
+  })
+
   it('handles a single clip (offset 0, unchanged samples)', () => {
     const clip1 = makeTelemetry([0, 500, 1000])
     const stitched = stitchClipTelemetry([{ telemetry: clip1, durationMs: 1000 }])
