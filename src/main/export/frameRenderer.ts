@@ -187,6 +187,7 @@ export async function createFrameRenderer(
         trackPoints: sampler.trackPoints,
         bounds: sampler.bounds,
         dotPosition,
+        hasGpsPosition: sampler.hasPositionAt(sampleCts),
         speedMps: sampler.speedAt(sampleCts, speedSmoothingMsFor(widget)),
         elapsedMs,
         cts: sampleCts,

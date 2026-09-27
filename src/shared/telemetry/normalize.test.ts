@@ -125,6 +125,23 @@ describe('normalizeGpsTelemetry', () => {
     expect(result.samples[0].cts).toBe(2000)
   })
 
+  it('filters malformed numbers and impossible coordinate ranges before normalization', () => {
+    const result = normalizeGpsTelemetry(
+      rawWithGps5Samples([
+        { cts: 0, value: [51.5, -0.12, 35, 10, 10] },
+        { cts: 100, value: [Number.NaN, -0.12, 35, 10, 10] },
+        { cts: 200, value: [51.5, Number.POSITIVE_INFINITY, 35, 10, 10] },
+        { cts: 300, value: [91, -0.12, 35, 10, 10] },
+        { cts: 400, value: [51.5, -181, 35, 10, 10] },
+        { cts: 500, value: [51.5, -0.12, Number.NaN, 10, 10] },
+        { cts: 600, value: [51.5001, -0.1201, 35, 12, 12] }
+      ]),
+      1000
+    )
+
+    expect(result.samples.map((sample) => sample.cts)).toEqual([0, 600])
+  })
+
   it('falls through to a second device if the first has no usable GPS', () => {
     const raw: RawGoProTelemetry = {
       1: { 'device name': 'No fix', streams: { GPS5: { samples: [{ cts: 0, value: [0, 0, 0, 0, 0] }] } } },

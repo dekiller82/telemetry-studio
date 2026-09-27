@@ -61,6 +61,8 @@ export interface TelemetrySampler {
   speedBounds: { min: number; max: number }
   /** Smoothly interpolated position (Catmull-Rom) at video time `cts` (ms). */
   positionAt: (cts: number) => ProjectedPoint
+  /** Whether `cts` falls inside the retained, trustworthy GPS sample range. */
+  hasPositionAt: (cts: number) => boolean
   /**
    * Speed (m/s) at video time `cts`, Gaussian-smoothed over a `smoothingMs` window to damp
    * raw GPS jitter. A window floor keeps the result continuous between samples even at
@@ -198,8 +200,12 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
   const elevationProfile: ElevationProfilePoint[] = samples.map((s, i) => ({ distanceM: cumDistanceM[i], altitude: s.altitude, cts: s.cts }))
   const headingComponents = computeHeadingComponents(samples, trackPoints)
 
+  function hasPositionAt(cts: number): boolean {
+    return samples.length > 0 && cts >= samples[0].cts && cts <= samples[samples.length - 1].cts
+  }
+
   function elevationAt(cts: number, smoothingMs = DEFAULT_ELEVATION_SMOOTHING_MS): number {
-    if (samples.length === 0) return 0
+    if (!hasPositionAt(cts)) return 0
     return gaussianSmoothedValueAt(samples, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), (s) => s.altitude)
   }
 
@@ -209,7 +215,7 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
   }
 
   function headingAt(cts: number, smoothingMs = DEFAULT_HEADING_SMOOTHING_MS): number {
-    if (headingComponents.length === 0) return 0
+    if (!hasPositionAt(cts) || headingComponents.length === 0) return 0
     const window = Math.max(MIN_SMOOTHING_MS, smoothingMs)
     const cosAvg = gaussianSmoothedValueAt(headingComponents, cts, window, (c) => c.cosB)
     const sinAvg = gaussianSmoothedValueAt(headingComponents, cts, window, (c) => c.sinB)
@@ -275,8 +281,9 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
     trackCts,
     speedBounds,
     positionAt: (cts: number) => positionAt(samples, trackPoints, cts),
+    hasPositionAt,
     speedAt: (cts: number, smoothingMs = DEFAULT_SPEED_SMOOTHING_MS) =>
-      gaussianSmoothedValueAt(samples, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), (s) => s.speed2D),
+      hasPositionAt(cts) ? gaussianSmoothedValueAt(samples, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), (s) => s.speed2D) : 0,
     hasImuData: accel.length > 0,
     defaultAxisCalibration,
     gForceAt,

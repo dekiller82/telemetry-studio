@@ -159,6 +159,8 @@ export interface DrawGpsWidgetOptions {
   rect: Rect
   trackPoints: ProjectedPoint[]
   dotPosition: ProjectedPoint
+  /** False when the current frame lies outside the retained, trustworthy GPS time range. */
+  showDot?: boolean
   bounds: TrackBounds
   style: GpsWidgetStyle
   /** Raw speed2D + cts, 1:1 index-aligned with trackPoints -- only needed for colorMode 'speed'/'braking'
@@ -205,7 +207,7 @@ export function buildColoredGpsTrackCache(
 
 /** Draws the Quik-style GPS track: a line for the full lap/session shape plus a dot for current position. */
 export function drawGpsWidget(ctx: Canvas2DLike, options: DrawGpsWidgetOptions): void {
-  const { rect, trackPoints, dotPosition, bounds, style, trackSpeeds, trackCts, speedBounds, coloredTrackImage, ghostPosition, apexPositions } =
+  const { rect, trackPoints, dotPosition, showDot = true, bounds, style, trackSpeeds, trackCts, speedBounds, coloredTrackImage, ghostPosition, apexPositions } =
     options
   if (trackPoints.length === 0) return
 
@@ -277,15 +279,17 @@ export function drawGpsWidget(ctx: Canvas2DLike, options: DrawGpsWidgetOptions):
     ctx.restore()
   }
 
-  ctx.save()
-  ctx.globalAlpha = 1
-  if (style.dotGlow) {
-    ctx.shadowBlur = dotRadius * 2.5
-    ctx.shadowColor = style.dotColor
+  if (showDot) {
+    ctx.save()
+    ctx.globalAlpha = 1
+    if (style.dotGlow) {
+      ctx.shadowBlur = dotRadius * 2.5
+      ctx.shadowColor = style.dotColor
+    }
+    ctx.fillStyle = style.dotColor
+    ctx.beginPath()
+    ctx.arc(screenDot.x, screenDot.y, dotRadius, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
   }
-  ctx.fillStyle = style.dotColor
-  ctx.beginPath()
-  ctx.arc(screenDot.x, screenDot.y, dotRadius, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.restore()
 }

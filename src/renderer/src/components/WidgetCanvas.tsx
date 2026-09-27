@@ -184,6 +184,7 @@ function WidgetCanvas({
       trackPoints: sampler.trackPoints,
       bounds: sampler.bounds,
       dotPosition: sampler.positionAt(currentTimeMs),
+      hasGpsPosition: sampler.hasPositionAt(currentTimeMs),
       speedMps: sampler.speedAt(currentTimeMs, speedSmoothingMsFor(widget)),
       elapsedMs: currentTimeMs,
       cts: currentTimeMs,

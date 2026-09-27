@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app, type OpenDialogOptions } from 'ele
 import { unlink } from 'fs/promises'
 import { ensurePreviewProxy } from '../video/previewProxy'
 import { probeAndParseClip, buildImportResult, sliceClipTelemetry, type ProbedClip } from '../video/clipImport'
+import { orderAndValidateGoProClipPaths } from '../video/goproClipOrder'
 import { loadProjectFromFile, saveProjectToFile } from '../project/persistence'
 import { listLayoutPresets, saveLayoutPreset, deleteLayoutPreset, defaultLayoutPresetsFilePath } from '../project/layoutPresets'
 import { autosaveProjectPath, hasAutosave, clearAutosave } from '../project/autosave'
@@ -31,9 +32,9 @@ export function registerIpcHandlers(): void {
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
 
     if (result.canceled || result.filePaths.length === 0) return []
-    // GoPro's own chapter naming (GH010230.MP4, GH020230.MP4, GH030230.MP4 = one recording split
-    // into parts) sorts correctly into chapter order alphabetically -- this is the clip order.
-    return [...result.filePaths].sort()
+    // Ordering and cross-recording validation happen inside video:import/video:add-clips, where
+    // any error is caught by the renderer and shown to the user instead of escaping from the file picker.
+    return result.filePaths
   })
 
   // Preview is attempted natively (full-res, no transcode) first -- this only runs when the
@@ -52,10 +53,11 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('video:import', async (event, filePaths: string[]): Promise<ImportResult> => {
+    const orderedPaths = orderAndValidateGoProClipPaths(filePaths)
     const probed: ProbedClip[] = []
-    for (let i = 0; i < filePaths.length; i++) {
+    for (let i = 0; i < orderedPaths.length; i++) {
       probed.push(
-        await probeAndParseClip(filePaths[i], i, filePaths.length, (progress) => {
+        await probeAndParseClip(orderedPaths[i], i, orderedPaths.length, (progress) => {
           event.sender.send('video:import-progress', progress)
         })
       )
@@ -67,17 +69,27 @@ export function registerIpcHandlers(): void {
   // already imported (the expensive part) -- reconstructs their raw per-clip telemetry by slicing
   // it back out of the already-stitched result instead.
   ipcMain.handle('video:add-clips', async (event, existing: ImportResult, newFilePaths: string[]): Promise<ImportResult> => {
+    const existingPaths = existing.clips.map((clip) => clip.video.path)
+    const orderedCombinedPaths = orderAndValidateGoProClipPaths([...existingPaths, ...newFilePaths])
+    const existingOrderStillFirst = existingPaths.every((filePath, index) => orderedCombinedPaths[index] === filePath)
+    if (!existingOrderStillFirst) {
+      throw new Error(
+        'The selected clip belongs before clips already in this timeline after ordering. Import all clips together in a new project.'
+      )
+    }
+    const orderedNewPaths = orderedCombinedPaths.slice(existingPaths.length)
+
     const existingProbed = existing.clips.map((clip) => ({
       video: clip.video,
       telemetry: sliceClipTelemetry(clip, existing.telemetry)
     }))
 
-    const totalClips = existing.clips.length + newFilePaths.length
+    const totalClips = existing.clips.length + orderedNewPaths.length
     const newProbed: ProbedClip[] = []
-    for (let i = 0; i < newFilePaths.length; i++) {
+    for (let i = 0; i < orderedNewPaths.length; i++) {
       const clipIndex = existing.clips.length + i
       newProbed.push(
-        await probeAndParseClip(newFilePaths[i], clipIndex, totalClips, (progress) => {
+        await probeAndParseClip(orderedNewPaths[i], clipIndex, totalClips, (progress) => {
           event.sender.send('video:import-progress', progress)
         })
       )

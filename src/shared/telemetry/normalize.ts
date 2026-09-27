@@ -32,6 +32,13 @@ export function normalizeGpsTelemetry(raw: RawGoProTelemetry, videoDurationMs: n
     const rawSamples = streams[gpsStream]?.samples ?? []
     const samples: TelemetrySample[] = rawSamples
       .filter((s) => Array.isArray(s.value) && s.value.length >= 5)
+      // Treat malformed numeric payloads and impossible geographic ranges as
+      // unusable before they can poison projection, distance, heading, or lap
+      // calculations downstream. GPS quality/motion filters run earlier in
+      // gopro-telemetry; these are format-level safety checks.
+      .filter((s) => s.value.slice(0, 5).every(Number.isFinite))
+      .filter((s) => s.value[0] >= -90 && s.value[0] <= 90)
+      .filter((s) => s.value[1] >= -180 && s.value[1] <= 180)
       // (0, 0) is GoPro's own convention for "no fix yet" (confirmed against a real clip that
       // never acquired a GPS lock -- every one of its samples came back exactly (0, 0), not just
       // near it). Null Island isn't a real recording location, so keeping these in would silently

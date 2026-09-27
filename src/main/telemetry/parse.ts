@@ -3,10 +3,18 @@ import { stat } from 'fs/promises'
 import gpmfExtract from 'gpmf-extract'
 import goproTelemetry from 'gopro-telemetry'
 import { normalizeTelemetry, type RawGoProTelemetry } from '../../shared/telemetry/normalize'
+import { filterGpsTrack } from '../../shared/telemetry/gpsTrackFilter'
 import type { TelemetryData } from '../../shared/types'
 
 // Matches gpmf-extract's own browser-mode worker chunk size (code/readBlock.js).
 const CHUNK_SIZE = 1024 * 1024 * 16
+
+// Keep 2D/3D fixes with DOP <= 5. Gross coordinate jumps are filtered after
+// normalization by comparing coordinate movement with GPS5/GPS9's own speed2D;
+// unlike gopro-telemetry's fixed WrongSpeed ceiling, that remains useful for
+// both low-speed karting and high-speed motorsport.
+const MIN_GPS_FIX = 2 as const
+const MAX_GPS_PRECISION = 500
 
 // Deliberately not the full shared `ImportProgress` (which also carries clipIndex/totalClips) --
 // this module parses one file at a time and has no notion of its own position in a multi-clip
@@ -82,10 +90,17 @@ export async function parseGoProTelemetry(
     // isn't present in the file, it's just absent from the result, so no separate fallback call is needed.
     const raw = await goproTelemetry(
       { rawData: extracted.rawData, timing: extracted.timing },
-      { stream: ['GPS', 'ACCL', 'GYRO', 'GRAV'], progress: (fraction: number) => onProgress?.({ phase: 'parsing', fraction }) }
+      {
+        stream: ['GPS', 'ACCL', 'GYRO', 'GRAV'],
+        GPS5Fix: MIN_GPS_FIX,
+        GPS5Precision: MAX_GPS_PRECISION,
+        progress: (fraction: number) => onProgress?.({ phase: 'parsing', fraction })
+      }
     )
     onProgress?.({ phase: 'parsing', fraction: 1 })
-    return normalizeTelemetry(raw as unknown as RawGoProTelemetry, videoDurationMs)
+    const normalized = normalizeTelemetry(raw as unknown as RawGoProTelemetry, videoDurationMs)
+    const filteredTrack = filterGpsTrack(normalized.samples)
+    return { ...normalized, samples: filteredTrack.samples }
   } catch (err) {
     // gpmf-extract's own Node-mode "no metadata track found" path throws a confusing internal
     // TypeError ("Cannot read properties of undefined (reading 'terminate')") instead of a clean

@@ -63,8 +63,26 @@ describe('createTelemetrySampler', () => {
   it('handles an empty telemetry sample list without throwing', () => {
     const sampler = createTelemetrySampler(makeTelemetry([]))
     expect(sampler.trackPoints).toEqual([])
+    expect(sampler.hasPositionAt(0)).toBe(false)
     expect(() => sampler.positionAt(0)).not.toThrow()
     expect(() => sampler.speedAt(0)).not.toThrow()
+  })
+
+  it('reports telemetry as unavailable outside the retained GPS time range', () => {
+    const samples = [
+      makeSample(1_000, { altitude: 123, speed2D: 10 }),
+      makeSample(2_000, { lat: 51.501, altitude: 125, speed2D: 12 })
+    ]
+    const sampler = createTelemetrySampler(makeTelemetry(samples))
+
+    expect(sampler.hasPositionAt(999)).toBe(false)
+    expect(sampler.hasPositionAt(1_000)).toBe(true)
+    expect(sampler.hasPositionAt(2_000)).toBe(true)
+    expect(sampler.hasPositionAt(2_001)).toBe(false)
+    expect(sampler.speedAt(999)).toBe(0)
+    expect(sampler.elevationAt(999)).toBe(0)
+    expect(sampler.headingAt(999)).toBe(0)
+    expect(sampler.speedAt(2_001)).toBe(0)
   })
 })
 
