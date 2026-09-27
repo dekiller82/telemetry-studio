@@ -56,3 +56,36 @@ describe('project replacement generation', () => {
     expect(useProjectStore.getState().projectGeneration).toBe(generation)
   })
 })
+
+describe('ignored (manually deleted) crossings', () => {
+  it('marks and restores a crossing by its raw index', () => {
+    useProjectStore.getState().ignoreCrossing(2)
+    expect(useProjectStore.getState().ignoredCrossings).toEqual({ '2': true })
+
+    useProjectStore.getState().restoreCrossing(2)
+    expect(useProjectStore.getState().ignoredCrossings).toEqual({})
+  })
+
+  it('clears ignored crossings (and nudge adjustments) when startFinish changes', () => {
+    useProjectStore.getState().nudgeCrossing(0, 500)
+    useProjectStore.getState().ignoreCrossing(1)
+
+    useProjectStore.getState().setStartFinish({ lat: 1, lon: 2 })
+
+    expect(useProjectStore.getState().crossingAdjustmentsMs).toEqual({})
+    expect(useProjectStore.getState().ignoredCrossings).toEqual({})
+  })
+
+  it('also clears ignored crossings and nudge adjustments when the detection radius changes', () => {
+    // A different radius can reshuffle the RAW detection order those are keyed by -- stale entries
+    // must not silently apply to a different lap after the radius changes.
+    useProjectStore.getState().nudgeCrossing(0, 500)
+    useProjectStore.getState().ignoreCrossing(1)
+
+    useProjectStore.getState().setStartFinishRadiusM(10)
+
+    expect(useProjectStore.getState().startFinishRadiusM).toBe(10)
+    expect(useProjectStore.getState().crossingAdjustmentsMs).toEqual({})
+    expect(useProjectStore.getState().ignoredCrossings).toEqual({})
+  })
+})

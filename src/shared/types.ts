@@ -9,6 +9,10 @@ export interface LatLon {
  *  LatLon; laps.ts re-exports it for the call sites that only care about lap detection. */
 export type CrossingAdjustments = Record<string, number>
 
+/** Marks a detected crossing (by the same raw detection-order index CrossingAdjustments uses) as a
+ *  false lap the user manually deleted -- see shared/telemetry/laps.ts's detectLapCrossings. */
+export type CrossingIgnoreSet = Record<string, boolean>
+
 export interface TelemetrySample {
   /** Milliseconds from the start of the video, aligned with HTMLVideoElement.currentTime * 1000 */
   cts: number
@@ -240,6 +244,11 @@ export interface ProjectPayload {
    *  mode, sectorTimer, and any future widget with the same need) -- set once, used everywhere,
    *  instead of each widget needing its own copy. */
   startFinish: LatLon | null
+  /** Start/finish detection radius, meters -- see shared/telemetry/laps.ts's
+   *  DEFAULT_THRESHOLD_METERS (that constant is the default when this field is absent, e.g. an
+   *  older saved project). Tighten it if the track's own layout passes close to the line at some
+   *  OTHER point than the actual line, registering a false lap. */
+  startFinishRadiusM: number
   /** Manual per-crossing time corrections (ms, signed), keyed by the crossing's 0-based index in
    *  the array `detectLapCrossings` returns for the current startFinish point -- see
    *  shared/telemetry/laps.ts's CrossingAdjustments. Corrects the local-minimum heuristic
@@ -247,6 +256,10 @@ export interface ProjectPayload {
    *  point specifically -- cleared whenever it changes, since a different point recomputes a
    *  different crossings array where the same index may no longer mean the same lap. */
   crossingAdjustmentsMs: CrossingAdjustments
+  /** Crossings the user manually deleted (a false lap detection) -- see
+   *  shared/telemetry/laps.ts's CrossingIgnoreSet. Keyed the same way, and cleared the same time, as
+   *  crossingAdjustmentsMs above. */
+  ignoredCrossings: CrossingIgnoreSet
   /** Whole-sequence trim (global ms, spanning all clips) -- cuts dead time from the very start of
    *  the first clip and/or the very end of the last clip. Does NOT affect lap/sector detection
    *  (physically tied to GPS crossings, independent of any later edit decision) -- only changes

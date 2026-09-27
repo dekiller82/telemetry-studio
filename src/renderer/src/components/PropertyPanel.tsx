@@ -174,7 +174,10 @@ function PropertyPanel(): React.JSX.Element {
   const currentTimeMs = useProjectStore((s) => s.currentTimeMs)
   const startFinish = useProjectStore((s) => s.startFinish)
   const setStartFinish = useProjectStore((s) => s.setStartFinish)
+  const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
+  const setStartFinishRadiusM = useProjectStore((s) => s.setStartFinishRadiusM)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
+  const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
   const isExporting = useProjectStore((s) => s.isExporting)
   const paddingFraction = useAlignmentStore((s) => s.paddingFraction)
   const setPaddingFraction = useAlignmentStore((s) => s.setPaddingFraction)
@@ -204,10 +207,10 @@ function PropertyPanel(): React.JSX.Element {
     if (!selected || selected.type !== 'gpsTrack' || !selected.style.showGhost) return null
     if (!startFinish) return 'no-start-finish'
     if (!imported) return 'no-completed-lap'
-    const crossings = detectLapCrossings(imported.telemetry.samples, startFinish, undefined, undefined, crossingAdjustmentsMs)
+    const crossings = detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
     const hasCompletedLap = crossings.some((c, i) => i > 0 && c <= currentTimeMs)
     return hasCompletedLap ? 'active' : 'no-completed-lap'
-  }, [selected, startFinish, imported, currentTimeMs, crossingAdjustmentsMs])
+  }, [selected, startFinish, startFinishRadiusM, imported, currentTimeMs, crossingAdjustmentsMs, ignoredCrossings])
 
   const [layoutPresets, setLayoutPresets] = useState<WidgetLayoutPreset[]>([])
   useEffect(() => {
@@ -330,6 +333,26 @@ function PropertyPanel(): React.JSX.Element {
             ? `Set at ${startFinish.lat.toFixed(5)}, ${startFinish.lon.toFixed(5)}`
             : 'Not set — used by any Timer (lap mode) or Sector Timer widget. Scrub to the lap line, then click "Set at current position".'}
         </span>
+        {startFinish && (
+          <>
+            <label className="field">
+              <span>Detection radius ({startFinishRadiusM}m)</span>
+              <input
+                type="range"
+                min={3}
+                max={40}
+                step={1}
+                value={startFinishRadiusM}
+                onChange={(e) => setStartFinishRadiusM(Number(e.target.value))}
+              />
+            </label>
+            <span className="field__hint">
+              How close the car/kart must pass to count as crossing the line. Lower this if a lap is
+              detected somewhere the track loops back near the line, but isn't the actual line -- use
+              the timeline's lap markers to spot and delete a false one if it still slips through.
+            </span>
+          </>
+        )}
       </div>
 
       <div className="property-panel__section">
@@ -832,6 +855,22 @@ function PropertyPanel(): React.JSX.Element {
                 actually visible instead of a fraction of a pixel on the full track.
               </span>
             </>
+          )}
+
+          <label className="field field--checkbox">
+            <input
+              type="checkbox"
+              checked={style.trimAware}
+              onChange={(e) => updateWidget(selected.id, { style: { ...style, trimAware: e.target.checked } })}
+            />
+            <span>Crop map to trimmed range</span>
+          </label>
+          {style.trimAware && (
+            <span className="field__hint">
+              Only draws the track shape between your trim start/end points, instead of the whole recording --
+              use this to exclude a bad-GPS stretch (e.g. parked under cover, sitting on the grid) by trimming
+              it out of the video first.
+            </span>
           )}
 
           <label className="field field--checkbox">

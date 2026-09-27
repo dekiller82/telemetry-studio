@@ -28,6 +28,7 @@ interface Props {
   deltaState: DeltaState | null
   ghostPosition: ProjectedPoint | null
   sessionSummaryData: SessionSummaryData | null
+  trimStartMs: number
   sessionEndMs: number
   lapSpeedTraces: LapSpeedTrace[]
   currentLapSpeedTrace: LapSpeedTrace | null
@@ -45,6 +46,7 @@ function WidgetCanvas({
   deltaState,
   ghostPosition,
   sessionSummaryData,
+  trimStartMs,
   sessionEndMs,
   lapSpeedTraces,
   currentLapSpeedTrace,
@@ -193,6 +195,7 @@ function WidgetCanvas({
       deltaState,
       ghostPosition,
       sessionSummaryData: sessionSummaryData ?? undefined,
+      trimStartMs,
       sessionEndMs,
       apexEvents,
       apexPositions,
@@ -226,6 +229,7 @@ function WidgetCanvas({
     deltaState,
     ghostPosition,
     sessionSummaryData,
+    trimStartMs,
     sessionEndMs,
     apexEvents,
     apexPositions,

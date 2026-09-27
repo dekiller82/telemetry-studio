@@ -1,7 +1,7 @@
 import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { formatTime } from '@shared/format'
 import { clipIndexAtGlobalMs } from '@shared/timeline/clipTiming'
-import { detectLapCrossings, fastestLapRange, lapTimesFromCrossings } from '@shared/telemetry/laps'
+import { detectLapCrossingsDetailed, fastestLapRange, lapTimesFromCrossings } from '@shared/telemetry/laps'
 import type { TelemetrySampler } from '@shared/telemetry/sampleAt'
 import { useProjectStore } from '../store/projectStore'
 import { useWidgetStore } from '../store/widgetStore'
@@ -28,27 +28,49 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
   const trimEndMs = useProjectStore((s) => s.trimEndMs)
   const setTrim = useProjectStore((s) => s.setTrim)
   const startFinish = useProjectStore((s) => s.startFinish)
+  const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
+  const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
   const nudgeCrossing = useProjectStore((s) => s.nudgeCrossing)
   const resetCrossingAdjustment = useProjectStore((s) => s.resetCrossingAdjustment)
+  const ignoreCrossing = useProjectStore((s) => s.ignoreCrossing)
+  const restoreCrossing = useProjectStore((s) => s.restoreCrossing)
   const widgetSelectedIds = useWidgetStore((s) => s.selectedIds)
 
-  // Start/finish crossings, shared by the "Jump to fastest lap" button, the per-lap timeline
-  // markers below, and their tooltips -- recomputed only when the telemetry/start-finish point
-  // actually change, not per frame.
-  const crossings = useMemo(() => {
+  // EVERY detected crossing (including manually-deleted ones, so their timeline marker can still
+  // be found and restored), shared by the "Jump to fastest lap" button, the per-lap timeline
+  // markers below, and their tooltips -- recomputed only when the telemetry/start-finish
+  // point/radius actually change, not per frame. Each carries a stable `rawIndex` (its position in
+  // the RAW, unadjusted detection order) -- that, not its position in this array, is what
+  // nudge/reset/delete/restore key off of, so it keeps referring to the same physical crossing
+  // regardless of which OTHER crossings have since been deleted.
+  const detailedCrossings = useMemo(() => {
     if (!sampler || !startFinish) return []
-    return detectLapCrossings(sampler.samples, startFinish, undefined, undefined, crossingAdjustmentsMs)
-  }, [sampler, startFinish, crossingAdjustmentsMs])
+    return detectLapCrossingsDetailed(sampler.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+  }, [sampler, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings])
 
-  // Which crossing (by index) the nudge control below is currently adjusting -- selected by
-  // clicking its timeline marker. Cleared whenever the crossing list itself changes shape (new
-  // start/finish point, or a different import) so a stale index can't silently point at a
-  // different lap after a change never intended to affect this control.
-  const [selectedCrossingIndex, setSelectedCrossingIndex] = useState<number | null>(null)
+  // Real (non-deleted) crossings, each tagged with its actual lap number (1-indexed position
+  // among non-deleted crossings) for display -- a deleted crossing in between doesn't consume a
+  // lap number.
+  const crossingsForDisplay = useMemo(() => {
+    let lapNumber = 0
+    return detailedCrossings.map((c) => {
+      if (!c.ignored) lapNumber += 1
+      return { ...c, lapNumber }
+    })
+  }, [detailedCrossings])
+
+  // What lapTimes/fastestLap/the "Fastest lap" button actually want: just the real crossings' cts.
+  const crossings = useMemo(() => detailedCrossings.filter((c) => !c.ignored).map((c) => c.cts), [detailedCrossings])
+
+  // Which crossing (by its stable rawIndex) the nudge/delete control below is currently showing --
+  // selected by clicking its timeline marker. Cleared whenever the crossing list itself changes
+  // shape (new start/finish point, a different radius, or a different import) so a stale index
+  // can't silently point at a different lap after a change never intended to affect this control.
+  const [selectedRawIndex, setSelectedRawIndex] = useState<number | null>(null)
   useEffect(() => {
-    setSelectedCrossingIndex(null)
-  }, [sampler, startFinish])
+    setSelectedRawIndex(null)
+  }, [sampler, startFinish, startFinishRadiusM])
 
   // 1 video frame's duration in ms at a given global cts, using whichever clip is actually active
   // there -- same lookup stepFrame already does for the same reason (clips can have different fps).
@@ -314,9 +336,10 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
 
   if (!imported) return null
 
-  const selectedCrossingCts = selectedCrossingIndex !== null ? crossings[selectedCrossingIndex] : undefined
+  const selectedCrossing = selectedRawIndex !== null ? crossingsForDisplay.find((c) => c.rawIndex === selectedRawIndex) ?? null : null
+  const selectedCrossingCts = selectedCrossing?.cts
   const selectedFrameMs = selectedCrossingCts !== undefined ? frameDurationMsAt(selectedCrossingCts) : 0
-  const selectedAdjustmentMs = selectedCrossingIndex !== null ? crossingAdjustmentsMs[String(selectedCrossingIndex)] ?? 0 : 0
+  const selectedAdjustmentMs = selectedRawIndex !== null ? crossingAdjustmentsMs[String(selectedRawIndex)] ?? 0 : 0
   const selectedAdjustmentFrames = selectedFrameMs > 0 ? Math.round(selectedAdjustmentMs / selectedFrameMs) : 0
 
   const pct = totalDurationMs ? Math.min(100, (currentTimeMs / totalDurationMs) * 100) : 0
@@ -368,25 +391,27 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
           const clipPct = totalDurationMs ? (clip.startOffsetMs / totalDurationMs) * 100 : 0
           return <div key={clip.startOffsetMs} className="timeline__clip-marker" style={{ left: `${clipPct}%` }} />
         })}
-        {crossings.map((cts, i) => {
+        {crossingsForDisplay.map(({ cts, rawIndex, ignored, lapNumber }) => {
           const lapPct = totalDurationMs ? (cts / totalDurationMs) * 100 : 0
-          const precedingLapTime = i > 0 ? lapTimes[i - 1] : null
-          const isAdjusted = (crossingAdjustmentsMs[String(i)] ?? 0) !== 0
+          const precedingLapTime = !ignored && lapNumber > 1 ? lapTimes[lapNumber - 2] : null
+          const isAdjusted = (crossingAdjustmentsMs[String(rawIndex)] ?? 0) !== 0
           return (
             <div
-              key={i}
-              className={`timeline__lap-marker${i === selectedCrossingIndex ? ' timeline__lap-marker--selected' : ''}${isAdjusted ? ' timeline__lap-marker--adjusted' : ''}`}
+              key={rawIndex}
+              className={`timeline__lap-marker${rawIndex === selectedRawIndex ? ' timeline__lap-marker--selected' : ''}${isAdjusted ? ' timeline__lap-marker--adjusted' : ''}${ignored ? ' timeline__lap-marker--ignored' : ''}`}
               style={{ left: `${lapPct}%` }}
               onMouseDown={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
-                setSelectedCrossingIndex(i)
+                setSelectedRawIndex(rawIndex)
                 jumpToLapStart(cts)
               }}
               title={
-                (precedingLapTime !== null
-                  ? `Lap ${i + 1} start (Lap ${i} was ${formatTime(precedingLapTime, true)})`
-                  : `Lap ${i + 1} start`) + (isAdjusted ? ' -- manually adjusted, click to fine-tune' : ' -- click to fine-tune')
+                ignored
+                  ? 'Deleted lap (false detection) -- click to restore'
+                  : (precedingLapTime !== null
+                      ? `Lap ${lapNumber} start (Lap ${lapNumber - 1} was ${formatTime(precedingLapTime, true)})`
+                      : `Lap ${lapNumber} start`) + (isAdjusted ? ' -- manually adjusted, click to fine-tune' : ' -- click to fine-tune')
               }
             />
           )
@@ -407,47 +432,74 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       </div>
       <span className="timeline__time timeline__time--dim">{formatTime(totalDurationMs, true)}</span>
     </div>
-    {selectedCrossingIndex !== null && selectedCrossingCts !== undefined && (
+    {selectedRawIndex !== null && selectedCrossing && selectedCrossingCts !== undefined && (
       <div className="timeline-nudge">
-        <span className="timeline-nudge__label">
-          Lap {selectedCrossingIndex + 1} start
-          {selectedAdjustmentFrames !== 0 && (
-            <span className="timeline-nudge__amount"> ({selectedAdjustmentFrames > 0 ? '+' : ''}{selectedAdjustmentFrames} frame{Math.abs(selectedAdjustmentFrames) === 1 ? '' : 's'})</span>
-          )}
-          {' -- crossing registered too early/late? Nudge it here.'}
-        </span>
-        <button
-          className="timeline-nudge__button"
-          onClick={() => {
-            nudgeCrossing(selectedCrossingIndex, -selectedFrameMs)
-            playerApiRef.current?.seekToGlobalMs(selectedCrossingCts - selectedFrameMs)
-          }}
-          title="1 frame earlier -- also seeks the video there so you can see the new crossing frame"
-        >
-          ◀ 1 frame
-        </button>
-        <button
-          className="timeline-nudge__button"
-          onClick={() => {
-            nudgeCrossing(selectedCrossingIndex, selectedFrameMs)
-            playerApiRef.current?.seekToGlobalMs(selectedCrossingCts + selectedFrameMs)
-          }}
-          title="1 frame later -- also seeks the video there so you can see the new crossing frame"
-        >
-          1 frame ▶
-        </button>
-        <button
-          className="timeline-nudge__button timeline-nudge__button--reset"
-          onClick={() => {
-            resetCrossingAdjustment(selectedCrossingIndex)
-            playerApiRef.current?.seekToGlobalMs(selectedCrossingCts - selectedAdjustmentMs)
-          }}
-          disabled={selectedAdjustmentFrames === 0}
-          title="Reset to the automatically detected position"
-        >
-          Reset
-        </button>
-        <button className="timeline-nudge__button timeline-nudge__button--close" onClick={() => setSelectedCrossingIndex(null)} title="Close">
+        {selectedCrossing.ignored ? (
+          <>
+            <span className="timeline-nudge__label">
+              This lap was deleted as a false detection -- it's excluded from lap timing and every lap-based widget.
+            </span>
+            <button
+              className="timeline-nudge__button"
+              onClick={() => restoreCrossing(selectedRawIndex)}
+              title="Restore this crossing"
+            >
+              Restore
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="timeline-nudge__label">
+              Lap {selectedCrossing.lapNumber} start
+              {selectedAdjustmentFrames !== 0 && (
+                <span className="timeline-nudge__amount"> ({selectedAdjustmentFrames > 0 ? '+' : ''}{selectedAdjustmentFrames} frame{Math.abs(selectedAdjustmentFrames) === 1 ? '' : 's'})</span>
+              )}
+              {' -- crossing registered too early/late? Nudge it here.'}
+            </span>
+            <button
+              className="timeline-nudge__button"
+              onClick={() => {
+                nudgeCrossing(selectedRawIndex, -selectedFrameMs)
+                playerApiRef.current?.seekToGlobalMs(selectedCrossingCts - selectedFrameMs)
+              }}
+              title="1 frame earlier -- also seeks the video there so you can see the new crossing frame"
+            >
+              ◀ 1 frame
+            </button>
+            <button
+              className="timeline-nudge__button"
+              onClick={() => {
+                nudgeCrossing(selectedRawIndex, selectedFrameMs)
+                playerApiRef.current?.seekToGlobalMs(selectedCrossingCts + selectedFrameMs)
+              }}
+              title="1 frame later -- also seeks the video there so you can see the new crossing frame"
+            >
+              1 frame ▶
+            </button>
+            <button
+              className="timeline-nudge__button timeline-nudge__button--reset"
+              onClick={() => {
+                resetCrossingAdjustment(selectedRawIndex)
+                playerApiRef.current?.seekToGlobalMs(selectedCrossingCts - selectedAdjustmentMs)
+              }}
+              disabled={selectedAdjustmentFrames === 0}
+              title="Reset to the automatically detected position"
+            >
+              Reset
+            </button>
+            <button
+              className="timeline-nudge__button timeline-nudge__button--delete"
+              onClick={() => {
+                ignoreCrossing(selectedRawIndex)
+                setSelectedRawIndex(null)
+              }}
+              title="Delete this lap -- a false detection, e.g. the track passing close to the line somewhere that isn't the actual line"
+            >
+              Delete lap
+            </button>
+          </>
+        )}
+        <button className="timeline-nudge__button timeline-nudge__button--close" onClick={() => setSelectedRawIndex(null)} title="Close">
           ×
         </button>
       </div>

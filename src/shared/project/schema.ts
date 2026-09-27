@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { FORMULA1_FONT_ID } from '../render/fonts'
+import { DEFAULT_THRESHOLD_METERS } from '../telemetry/laps'
 
 const transformFields = {
   x: z.number(),
@@ -39,7 +40,8 @@ const gpsStyleSchema = z.object({
   showApexMarkers: z.boolean().default(false),
   apexMarkerColor: z.string().default('#ffd60a'),
   apexMinDropMps: z.number().default(8),
-  apexMinGapMs: z.number().default(1500)
+  apexMinGapMs: z.number().default(1500),
+  trimAware: z.boolean().default(true)
 })
 
 const speedometerStyleSchema = z.object({
@@ -67,6 +69,10 @@ const latLonSchema = z.object({
 // .default({}) -- added after the project file format shipped, so an already-saved project (no
 // manual crossing corrections at all) still parses.
 const crossingAdjustmentsSchema = z.record(z.string(), z.number()).default({})
+
+// .default({}) -- same reasoning as crossingAdjustmentsSchema above; an already-saved project has
+// no manually-deleted crossings.
+const ignoredCrossingsSchema = z.record(z.string(), z.boolean()).default({})
 
 const timerStyleSchema = z.object({
   color: z.string(),
@@ -515,9 +521,15 @@ export const projectFileSchema = z.object({
   widgets: z.array(widgetSchema),
   /** One start/finish line shared by every widget that needs lap/sector detection. */
   startFinish: latLonSchema.nullable(),
+  // .default(...) -- added after the project file format shipped, so an already-saved project (which
+  // always used the hardcoded default) still parses and keeps behaving exactly as it did before.
+  startFinishRadiusM: z.number().default(DEFAULT_THRESHOLD_METERS),
   /** Manual per-crossing time corrections for the startFinish point above -- see
    *  shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: crossingAdjustmentsSchema,
+  /** Crossings manually deleted (a false lap detection) for the startFinish point above -- see
+   *  shared/types.ts's CrossingIgnoreSet. */
+  ignoredCrossings: ignoredCrossingsSchema,
   /** Whole-sequence trim, global ms spanning all clips. */
   trimStartMs: z.number(),
   trimEndMs: z.number(),
@@ -572,7 +584,9 @@ export function parseProjectFile(raw: unknown): ProjectFile {
       ...rest,
       version: 2,
       clips: [{ video: { ...sourceVideo, hasAudio: true, lrvPath: null }, startOffsetMs: 0 }],
+      startFinishRadiusM: DEFAULT_THRESHOLD_METERS,
       crossingAdjustmentsMs: {},
+      ignoredCrossings: {},
       trimStartMs: 0,
       trimEndMs: sourceVideo.durationMs,
       defaultFontFamily: FORMULA1_FONT_ID

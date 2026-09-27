@@ -53,7 +53,9 @@ function makePayload(dir: string, clipCount = 1, crossingAdjustmentsMs: ProjectP
     imported,
     widgets: [createWidget('gpsTrack'), createWidget('speedometerAnalog'), createWidget('timer')],
     startFinish: { lat: 51.5, lon: -0.1 },
+    startFinishRadiusM: 15,
     crossingAdjustmentsMs,
+    ignoredCrossings: {},
     trimStartMs: 0,
     trimEndMs: offsetMs,
     defaultFontFamily: FORMULA1_FONT_ID

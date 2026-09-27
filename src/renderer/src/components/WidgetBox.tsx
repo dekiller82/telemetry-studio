@@ -32,6 +32,7 @@ interface Props {
   deltaState: DeltaState | null
   ghostPosition: ProjectedPoint | null
   sessionSummaryData: SessionSummaryData | null
+  trimStartMs: number
   sessionEndMs: number
   lapSpeedTraces: LapSpeedTrace[]
   currentLapSpeedTrace: LapSpeedTrace | null
@@ -58,6 +59,7 @@ function WidgetBox({
   deltaState,
   ghostPosition,
   sessionSummaryData,
+  trimStartMs,
   sessionEndMs,
   lapSpeedTraces,
   currentLapSpeedTrace,
@@ -207,6 +209,7 @@ function WidgetBox({
           deltaState={deltaState}
           ghostPosition={ghostPosition}
           sessionSummaryData={sessionSummaryData}
+          trimStartMs={trimStartMs}
           sessionEndMs={sessionEndMs}
           lapSpeedTraces={lapSpeedTraces}
           currentLapSpeedTrace={currentLapSpeedTrace}

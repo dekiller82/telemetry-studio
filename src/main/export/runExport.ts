@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import ffmpegPathRaw from 'ffmpeg-static'
-import type { ClipInfo, CrossingAdjustments, LatLon, WidgetInstance } from '../../shared/types'
+import type { ClipInfo, CrossingAdjustments, CrossingIgnoreSet, LatLon, WidgetInstance } from '../../shared/types'
 import type { TelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { createFrameRenderer } from './frameRenderer'
 import { selectVideoEncoder, CPU_ENCODER, type VideoEncoder } from './gpuEncoder'
@@ -40,8 +40,12 @@ export interface RunExportOptions {
   sampler: TelemetrySampler
   /** Shared by every widget that needs lap/sector detection. */
   startFinish: LatLon | null
+  /** Start/finish detection radius, meters -- see shared/types.ts's ProjectPayload.startFinishRadiusM. */
+  startFinishRadiusM: number
   /** Manual per-crossing time corrections for startFinish -- see shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: CrossingAdjustments
+  /** Crossings manually deleted as a false lap detection -- see shared/types.ts's CrossingIgnoreSet. */
+  ignoredCrossings: CrossingIgnoreSet
   /** Whole-sequence trim, global ms spanning all clips. */
   trimStartMs: number
   trimEndMs: number
@@ -328,7 +332,9 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     widgets,
     sampler,
     startFinish,
+    startFinishRadiusM,
     crossingAdjustmentsMs,
+    ignoredCrossings,
     trimStartMs,
     trimEndMs,
     defaultFontFamily,
@@ -351,7 +357,9 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     widgets,
     sampler,
     startFinish,
+    startFinishRadiusM,
     crossingAdjustmentsMs,
+    ignoredCrossings,
     trimEndMs,
     trimStartMs,
     defaultFontFamily

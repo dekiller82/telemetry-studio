@@ -292,6 +292,10 @@ body {
   color: var(--accent);
 }
 
+.export-banner--warning {
+  color: #ffb020;
+}
+
 .export-banner--update {
   color: #0a84ff;
 }
@@ -560,6 +564,16 @@ body {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
 }
 
+/* A manually-deleted (false-detection) lap -- dimmed rather than removed entirely, so it can still
+   be found and restored. */
+.timeline__lap-marker--ignored {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.timeline__lap-marker--ignored:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
 .timeline-nudge {
   display: flex;
   align-items: center;
@@ -601,6 +615,11 @@ body {
 .timeline-nudge__button--close {
   padding: 4px 8px;
   color: var(--text-dim);
+}
+
+.timeline-nudge__button--delete {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
 }
 
 .timeline__trim-mask {

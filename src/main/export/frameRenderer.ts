@@ -10,7 +10,7 @@ import { detectApexEvents, type ApexEvent } from '../../shared/telemetry/apex'
 import { detectAccelRuns, getAccelRunStateAt, type AccelRun } from '../../shared/telemetry/accelRuns'
 import { computeCurrentLapSpeedTrace, computeLapSpeedTraces } from '../../shared/telemetry/speedTrace'
 import { buildManualCalibration, buildManualCalibrationForRoll } from '../../shared/telemetry/imuCalibration'
-import type { CrossingAdjustments, LatLon, WidgetInstance } from '../../shared/types'
+import type { CrossingAdjustments, CrossingIgnoreSet, LatLon, WidgetInstance } from '../../shared/types'
 import { speedSmoothingMsFor } from '../../shared/widgets/helpers'
 import { unpremultiplyRgbaInPlace } from './unpremultiply'
 import { registerExportFonts } from './registerFonts'
@@ -24,8 +24,12 @@ export async function createFrameRenderer(
   widgets: WidgetInstance[],
   sampler: TelemetrySampler,
   startFinish: LatLon | null,
+  /** Start/finish detection radius, meters -- see shared/types.ts's ProjectPayload.startFinishRadiusM. */
+  startFinishRadiusM: number,
   /** Manual per-crossing time corrections for startFinish -- see shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: CrossingAdjustments,
+  /** Crossings manually deleted as a false lap detection -- see shared/types.ts's CrossingIgnoreSet. */
+  ignoredCrossings: CrossingIgnoreSet,
   /** Absolute cts (same space as sampleCts) at which the trimmed session ends -- used for the
    *  Session Summary widget's showLastSeconds countdown AND (with trimStartMs) its final totals. */
   trimEndMs: number,
@@ -45,7 +49,9 @@ export async function createFrameRenderer(
   // Precomputed once (O(n) over telemetry samples), not per-frame -- crossings/sectors/lap-distance
   // curves don't depend on cts. Every widget that needs lap detection shares the same global
   // start/finish line.
-  const crossings = startFinish ? detectLapCrossings(sampler.samples, startFinish, undefined, undefined, crossingAdjustmentsMs) : null
+  const crossings = startFinish
+    ? detectLapCrossings(sampler.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+    : null
   const sectorBoundaries = crossings ? computeLapSectors(sampler.samples, crossings) : null
   const lapDistanceCurves = crossings ? computeLapDistanceCurves(sampler.samples, crossings) : null
   // Full per-lap trace list, precomputed once -- must still be filtered to laps completed BY each
@@ -197,6 +203,7 @@ export async function createFrameRenderer(
         ghostPosition,
         apexPositions: apexPositionsByWidgetId.get(widget.id),
         sessionSummaryData,
+        trimStartMs,
         sessionEndMs: trimEndMs,
         apexEvents: apexEventsByWidgetId.get(widget.id) ?? [],
         headerImage: headerImageByWidgetId.get(widget.id) ?? null,

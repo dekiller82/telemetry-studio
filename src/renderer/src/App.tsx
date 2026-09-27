@@ -116,8 +116,12 @@ function App(): React.JSX.Element {
   const updateImportedClips = useProjectStore((s) => s.updateImportedClips)
   const startFinish = useProjectStore((s) => s.startFinish)
   const setStartFinish = useProjectStore((s) => s.setStartFinish)
+  const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
+  const setStartFinishRadiusM = useProjectStore((s) => s.setStartFinishRadiusM)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
   const setCrossingAdjustmentsMs = useProjectStore((s) => s.setCrossingAdjustmentsMs)
+  const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
+  const setIgnoredCrossings = useProjectStore((s) => s.setIgnoredCrossings)
   const trimStartMs = useProjectStore((s) => s.trimStartMs)
   const trimEndMs = useProjectStore((s) => s.trimEndMs)
   const setTrim = useProjectStore((s) => s.setTrim)
@@ -157,6 +161,13 @@ function App(): React.JSX.Element {
   // dependency on the toolbar dropdown -- especially now that dropdown lives one File-menu click
   // away rather than always visible.
   const activePresetLabel = exportPresetId === SOURCE_QUALITY_PRESET_ID ? 'Source quality' : (findDeliveryPreset(exportPresetId)?.label ?? 'Source quality')
+  // A real user's GoPro 5.3K (5312x2988) source crashed "Source quality" export outright (Electron's
+  // "reply was never sent" -- the main process itself dying mid-export, not a hang); switching to a
+  // preset that downscales below 4K fixed it for them. Root cause not pinned down (no way to
+  // reproduce/profile a native-canvas crash without the actual failing hardware) -- warn rather than
+  // block, since plenty of machines may export a very high native resolution just fine.
+  const referenceVideo = imported?.clips[0]?.video ?? null
+  const isVeryHighResSource = !!referenceVideo && (referenceVideo.width > 3840 || referenceVideo.height > 2160)
   const [autosaveAvailable, setAutosaveAvailable] = useState(false)
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([])
   const [changelog, setChangelog] = useState('')
@@ -294,8 +305,28 @@ function App(): React.JSX.Element {
   // ONCE and actually fires every 60s of wall-clock time -- putting these fast-changing values in
   // this effect's own deps would tear down and restart the timer on every single edit, and a user
   // who never pauses editing for a full 60s would never get an autosave at all.
-  const latestAutosaveInputRef = useRef({ imported, widgets, startFinish, crossingAdjustmentsMs, trimStartMs, trimEndMs, defaultFontFamily })
-  latestAutosaveInputRef.current = { imported, widgets, startFinish, crossingAdjustmentsMs, trimStartMs, trimEndMs, defaultFontFamily }
+  const latestAutosaveInputRef = useRef({
+    imported,
+    widgets,
+    startFinish,
+    startFinishRadiusM,
+    crossingAdjustmentsMs,
+    ignoredCrossings,
+    trimStartMs,
+    trimEndMs,
+    defaultFontFamily
+  })
+  latestAutosaveInputRef.current = {
+    imported,
+    widgets,
+    startFinish,
+    startFinishRadiusM,
+    crossingAdjustmentsMs,
+    ignoredCrossings,
+    trimStartMs,
+    trimEndMs,
+    defaultFontFamily
+  }
   useEffect(() => {
     const AUTOSAVE_INTERVAL_MS = 60_000
     const interval = setInterval(() => {
@@ -376,7 +407,9 @@ function App(): React.JSX.Element {
       setImported(project.imported)
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
+      setStartFinishRadiusM(project.startFinishRadiusM)
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
+      setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
       setDefaultFontFamily(project.defaultFontFamily)
       setStatus('idle')
@@ -397,7 +430,9 @@ function App(): React.JSX.Element {
       setImported(project.imported)
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
+      setStartFinishRadiusM(project.startFinishRadiusM)
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
+      setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
       setDefaultFontFamily(project.defaultFontFamily)
       setStatus('idle')
@@ -422,7 +457,9 @@ function App(): React.JSX.Element {
       setImported(project.imported)
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
+      setStartFinishRadiusM(project.startFinishRadiusM)
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
+      setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
       setDefaultFontFamily(project.defaultFontFamily)
       setAutosaveAvailable(false)
@@ -443,7 +480,17 @@ function App(): React.JSX.Element {
     if (!imported) return
     setError(null)
     try {
-      const path = await window.api.saveProject({ imported, widgets, startFinish, crossingAdjustmentsMs, trimStartMs, trimEndMs, defaultFontFamily })
+      const path = await window.api.saveProject({
+        imported,
+        widgets,
+        startFinish,
+        startFinishRadiusM,
+        crossingAdjustmentsMs,
+        ignoredCrossings,
+        trimStartMs,
+        trimEndMs,
+        defaultFontFamily
+      })
       if (path) {
         setSavedPath(path)
         refreshRecentProjects()
@@ -463,7 +510,7 @@ function App(): React.JSX.Element {
     setCancelRequested(false)
     try {
       const path = await window.api.exportVideo(
-        { imported, widgets, startFinish, crossingAdjustmentsMs, trimStartMs, trimEndMs, defaultFontFamily },
+        { imported, widgets, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, trimStartMs, trimEndMs, defaultFontFamily },
         exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId
       )
       if (wasCancelledRef.current) return
@@ -484,8 +531,10 @@ function App(): React.JSX.Element {
   // TelemetrySampler), recomputed only when the telemetry/start-finish point actually change.
   const fastestLap = useMemo(() => {
     if (!imported || !startFinish) return null
-    return fastestLapRange(detectLapCrossings(imported.telemetry.samples, startFinish, undefined, undefined, crossingAdjustmentsMs))
-  }, [imported, startFinish, crossingAdjustmentsMs])
+    return fastestLapRange(
+      detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+    )
+  }, [imported, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings])
 
   const [showBestLapExportForm, setShowBestLapExportForm] = useState(false)
   const [bestLapPaddingBeforeSec, setBestLapPaddingBeforeSec] = useState(5)
@@ -511,7 +560,9 @@ function App(): React.JSX.Element {
           imported,
           widgets,
           startFinish,
+          startFinishRadiusM,
           crossingAdjustmentsMs,
+          ignoredCrossings,
           trimStartMs: clipTrimStartMs,
           trimEndMs: clipTrimEndMs,
           defaultFontFamily
@@ -678,6 +729,16 @@ function App(): React.JSX.Element {
             </button>
           </div>
         </header>
+        {isVeryHighResSource && exportPresetId === SOURCE_QUALITY_PRESET_ID && referenceVideo && (
+          <div className="export-banner export-banner--warning">
+            This clip's native resolution ({referenceVideo.width}x{referenceVideo.height}) is unusually high and
+            has caused Export to crash on some systems. If Export fails, try a delivery preset instead of Source
+            quality.
+            <button className="export-banner__cancel" onClick={() => setExportPresetId('youtube-4k')}>
+              Switch to YouTube (4K)
+            </button>
+          </div>
+        )}
         {showBestLapExportForm && fastestLap && (
           <div className="best-lap-export-form">
             <span>

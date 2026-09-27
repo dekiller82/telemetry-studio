@@ -21,7 +21,9 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   const widgets = useWidgetStore((s) => s.widgets)
   const selectWidget = useWidgetStore((s) => s.selectWidget)
   const startFinish = useProjectStore((s) => s.startFinish)
+  const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
+  const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
   const trimStartMs = useProjectStore((s) => s.trimStartMs)
   const trimEndMs = useProjectStore((s) => s.trimEndMs)
   const defaultFontFamily = useProjectStore((s) => s.defaultFontFamily)
@@ -40,8 +42,11 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   // once here rather than duplicated per widget instance. Crossings/boundaries only depend on the
   // telemetry + chosen point, not on currentTimeMs, so this doesn't redo the O(n) scan every frame.
   const crossings = useMemo(
-    () => (sampler && startFinish ? detectLapCrossings(sampler.samples, startFinish, undefined, undefined, crossingAdjustmentsMs) : null),
-    [sampler, startFinish, crossingAdjustmentsMs]
+    () =>
+      sampler && startFinish
+        ? detectLapCrossings(sampler.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+        : null,
+    [sampler, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings]
   )
   const sectorBoundaries = useMemo(
     () => (sampler && crossings ? computeLapSectors(sampler.samples, crossings) : null),
@@ -138,6 +143,7 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
           deltaState={deltaState}
           ghostPosition={ghostPosition}
           sessionSummaryData={sessionSummaryData}
+          trimStartMs={trimStartMs}
           sessionEndMs={trimEndMs}
           lapSpeedTraces={lapSpeedTraces}
           currentLapSpeedTrace={currentLapSpeedTrace}
