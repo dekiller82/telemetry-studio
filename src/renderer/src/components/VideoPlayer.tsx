@@ -3,6 +3,7 @@ import { toAppVideoUrl } from '@shared/fileUrl'
 import { clipIndexAtGlobalMs, localMsWithinClip } from '@shared/timeline/clipTiming'
 import { useProjectStore } from '../store/projectStore'
 import { nextProxyStage, type ProxyStage } from './previewFallbackStage'
+import { canSyncMediaTime, createLatestSeekScheduler } from './latestSeekScheduler'
 
 /** Imperative seek API -- Editor.tsx creates one ref and hands it to both VideoPlayer (which
  *  populates it) and Timeline (which calls it). A direct method call has no state to go stale,
@@ -39,6 +40,7 @@ interface PendingSeek {
 
 function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Element | null {
   const imported = useProjectStore((s) => s.imported)
+  const projectGeneration = useProjectStore((s) => s.projectGeneration)
   const trimEndMs = useProjectStore((s) => s.trimEndMs)
   const setCurrentTimeMs = useProjectStore((s) => s.setCurrentTimeMs)
   const setIsPlaying = useProjectStore((s) => s.setIsPlaying)
@@ -62,17 +64,32 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
   // Set right before advancing to the next clip on 'ended' during playback, so playback resumes
   // automatically once that next clip is actually ready rather than just silently stopping.
   const resumeOnLoadRef = useRef(false)
+  const seekSchedulerRef = useRef<ReturnType<typeof createLatestSeekScheduler> | null>(null)
+  const applySeekRef = useRef<(ms: number) => void>(() => {})
 
   const activeClip = imported?.clips[activeClipIndex] ?? null
 
-  // A genuinely NEW import (not just appending more clips via "+ Add Clip") resets playback back
-  // to clip 0 -- keyed on the first clip's own path, which only changes on a fresh import.
-  const firstClipPath = imported?.clips[0]?.video.path ?? null
+  // A full project replacement disposes queued work even when the old and new projects happen to
+  // begin with the same video. Adding clips keeps the generation stable and preserves playback.
+  useEffect(() => {
+    const scheduler = createLatestSeekScheduler({
+      apply: (ms) => applySeekRef.current(ms),
+      busy: () => {
+        const el = videoRef.current
+        return !el || el.seeking || el.readyState < HTMLMediaElement.HAVE_METADATA || pendingSeekRef.current !== null
+      }
+    })
+    seekSchedulerRef.current = scheduler
+    return () => {
+      scheduler.dispose()
+      seekSchedulerRef.current = null
+    }
+  }, [projectGeneration, videoRef])
   useEffect(() => {
     setActiveClipIndex(0)
     proxyStageRef.current = new Map()
     pendingSeekRef.current = null
-  }, [firstClipPath])
+  }, [projectGeneration])
 
   // Single authoritative place that bumps `generationRef` -- fires whenever the active clip
   // actually changes, whether via seekToGlobalMs (a user scrub) or the 'ended' handler (natural
@@ -101,32 +118,41 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
   }, [videoRef, srcPath])
 
   useEffect(() => {
+    applySeekRef.current = (ms: number): void => {
+      if (!imported) return
+      const el = videoRef.current
+      if (!el) return
+      const targetClipIndex = clipIndexAtGlobalMs(imported.clips, ms)
+      if (targetClipIndex === -1) return
+      const targetClip = imported.clips[targetClipIndex]
+      const targetLocalSec = localMsWithinClip(targetClip, ms) / 1000
+      // currentSrc guards the interval between changing clips and the new resource loading.
+      // Metadata is sufficient to seek, even if a stalled source never emits loadeddata.
+      if (
+        targetClipIndex === activeClipIndex &&
+        el.readyState >= HTMLMediaElement.HAVE_METADATA &&
+        srcPath &&
+        el.currentSrc === toAppVideoUrl(srcPath)
+      ) {
+        pendingSeekRef.current = null
+        el.currentTime = targetLocalSec
+        return
+      }
+      pendingSeekRef.current = { generation: generationRef.current, targetSec: targetLocalSec }
+      if (targetClipIndex !== activeClipIndex) setActiveClipIndex(targetClipIndex)
+    }
     playerApiRef.current = {
       seekToGlobalMs(ms: number): void {
-        if (!imported) return
-        const el = videoRef.current
-        if (!el) return
-        const targetClipIndex = clipIndexAtGlobalMs(imported.clips, ms)
-        if (targetClipIndex === -1) return
-        const targetClip = imported.clips[targetClipIndex]
-        const targetLocalSec = localMsWithinClip(targetClip, ms) / 1000
-
-        // Fast path: same clip, and its element is actually ready to accept a seek.
-        if (targetClipIndex === activeClipIndex && el.readyState >= HTMLMediaElement.HAVE_METADATA) {
-          el.currentTime = targetLocalSec
-          setCurrentTimeMs(ms)
-          return
-        }
-
-        // The LATEST call always wins -- overwrites whatever was pending, never memoized/queued.
-        pendingSeekRef.current = { generation: generationRef.current, targetSec: targetLocalSec }
-        if (targetClipIndex !== activeClipIndex) setActiveClipIndex(targetClipIndex)
+        if (!imported || !Number.isFinite(ms) || clipIndexAtGlobalMs(imported.clips, ms) === -1) return
+        // Widgets follow the latest requested time immediately, even while the decoder catches up.
+        setCurrentTimeMs(ms)
+        seekSchedulerRef.current?.request(ms)
       }
     }
     return () => {
       playerApiRef.current = null
     }
-  }, [playerApiRef, videoRef, imported, activeClipIndex, setCurrentTimeMs])
+  }, [playerApiRef, videoRef, imported, activeClipIndex, srcPath, setCurrentTimeMs])
 
   useEffect(() => {
     const el = videoRef.current
@@ -137,9 +163,15 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     // instead of moving smoothly. Drive a rAF loop while playing instead, for a per-frame update;
     // fall back to `seeked`/`pause` for the paused/scrubbing case where no rAF loop is running.
     let rafId: number | null = null
+    const mediaMayOwnTimeline = (): boolean =>
+      canSyncMediaTime(
+        Boolean(seekSchedulerRef.current?.hasPending()),
+        pendingSeekRef.current !== null,
+        el.seeking
+      )
     const tick = (): void => {
       const globalMs = activeClip.startOffsetMs + el.currentTime * 1000
-      setCurrentTimeMs(globalMs)
+      if (mediaMayOwnTimeline()) setCurrentTimeMs(globalMs)
       if (globalMs >= trimEndMs) {
         el.pause()
         return
@@ -163,9 +195,14 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     const onPause = (): void => {
       setIsPlaying(false)
       stopLoop()
-      setCurrentTimeMs(activeClip.startOffsetMs + el.currentTime * 1000)
+      syncTime()
     }
-    const onSeeked = (): void => setCurrentTimeMs(activeClip.startOffsetMs + el.currentTime * 1000)
+    const syncTime = (): void => {
+      if (mediaMayOwnTimeline()) {
+        setCurrentTimeMs(activeClip.startOffsetMs + el.currentTime * 1000)
+      }
+    }
+    const onSeeked = syncTime
     const onLoadedData = (): void => {
       console.log('[video] loadeddata:', srcPath)
       setLoadState('ready')
@@ -179,7 +216,7 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
         resumeOnLoadRef.current = false
         el.play().catch((err) => console.error('[video] auto-resume into next clip failed:', err))
       }
-      setCurrentTimeMs(activeClip.startOffsetMs + el.currentTime * 1000)
+      syncTime()
     }
 
     // Advances to the next clip when one finishes during playback -- if this was the last clip,

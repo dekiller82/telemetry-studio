@@ -4,6 +4,9 @@ import { FORMULA1_FONT_ID } from '@shared/render/fonts'
 
 interface ProjectState {
   imported: ImportResult | null
+  /** Monotonic identity for a full project/import replacement. Unlike the imported object itself,
+   *  this deliberately does not change when "+ Add Clip" extends the current project. */
+  projectGeneration: number
   /** Position within the GLOBAL stitched timeline (spans every clip), ms. */
   currentTimeMs: number
   isPlaying: boolean
@@ -53,6 +56,7 @@ interface ProjectState {
 
 export const useProjectStore = create<ProjectState>((set) => ({
   imported: null,
+  projectGeneration: 0,
   currentTimeMs: 0,
   isPlaying: false,
   startFinish: null,
@@ -62,8 +66,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
   defaultFontFamily: FORMULA1_FONT_ID,
   isExporting: false,
   setImported: (imported) =>
-    set({
+    set((state) => ({
       imported,
+      projectGeneration: state.projectGeneration + 1,
       currentTimeMs: 0,
       isPlaying: false,
       startFinish: null,
@@ -71,7 +76,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
       trimStartMs: 0,
       trimEndMs: imported?.telemetry.videoDurationMs ?? 0,
       defaultFontFamily: FORMULA1_FONT_ID
-    }),
+    })),
   updateImportedClips: (imported) =>
     set((state) => ({
       imported,
