@@ -1,5 +1,5 @@
 import type { ProjectedPoint } from '../telemetry/interpolate'
-import type { TrackBounds } from '../telemetry/sampleAt'
+import { computeBounds, trimTrack, type TrackBounds } from '../telemetry/sampleAt'
 import type { LapState } from '../telemetry/laps'
 import type { SectorState } from '../telemetry/sectors'
 import type { DeltaState } from '../telemetry/deltaTime'
@@ -80,8 +80,13 @@ export interface WidgetDrawContext {
   hasImuData?: boolean
   /** Only relevant for a 'sessionSummary' widget. */
   sessionSummaryData?: SessionSummaryData
+  /** Absolute cts (same space as `cts`) at which the trimmed session starts -- only relevant for a
+   *  'sessionSummary' widget (its total-duration figure) and a 'gpsTrack' widget with
+   *  style.trimAware (crops the drawn track shape/bounds to [trimStartMs, sessionEndMs]). */
+  trimStartMs?: number
   /** Only relevant for a 'sessionSummary' widget -- absolute cts (same space as `cts`) at which the
-   *  trimmed session ends; style.showLastSeconds counts back from here. */
+   *  trimmed session ends; style.showLastSeconds counts back from here. Also doubles as the trim-end
+   *  bound for a 'gpsTrack' widget with style.trimAware, see trimStartMs above. */
   sessionEndMs?: number
   /** Only relevant for an 'elevation' widget -- current reading resolved per widget instance (its
    *  own smoothing style), the profile is the whole-session static shape shared globally (doesn't
@@ -115,22 +120,47 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
   const fontFamily = resolveEffectiveFontFamily(widget, data)
   const hasGpsPosition = data.hasGpsPosition !== false
   switch (widget.type) {
-    case 'gpsTrack':
+    case 'gpsTrack': {
+      // trimAware crops the drawn shape/bounds (and the dot's visibility) to just the project's
+      // trim range -- lets a bad-GPS stretch outside the trim (e.g. parked under a roof) be
+      // excluded from the map without needing the GPS filter itself to catch it. Falls back to the
+      // untrimmed shape if the caller didn't supply a trim range.
+      const trimAware = widget.style.trimAware && data.trimStartMs !== undefined && data.sessionEndMs !== undefined
+      let trackPoints = data.trackPoints
+      let bounds = data.bounds
+      let trackSpeeds = data.trackSpeeds
+      let trackCts = data.trackCts
+      // The cached colorMode 'speed'/'braking' image was pre-rendered against the UNTRIMMED shape --
+      // wrong to reuse once the shape itself has been cropped, so fall back to drawGpsWidget's own
+      // fresh-draw path (it already exists for the 'window' viewMode case) instead of showing stale
+      // pixels that don't match the new bounds.
+      let coloredTrackImage = data.coloredTrackImage
+      let showDot = hasGpsPosition
+      if (trimAware) {
+        const sliced = trimTrack(data.trackPoints, data.trackCts ?? [], data.trackSpeeds ?? [], data.trimStartMs!, data.sessionEndMs!)
+        trackPoints = sliced.trackPoints
+        bounds = computeBounds(trackPoints)
+        trackSpeeds = sliced.trackSpeeds
+        trackCts = sliced.trackCts
+        coloredTrackImage = null
+        showDot = showDot && data.cts >= data.trimStartMs! && data.cts <= data.sessionEndMs!
+      }
       drawGpsWidget(ctx, {
         rect,
         style: widget.style,
-        trackPoints: data.trackPoints,
-        bounds: data.bounds,
+        trackPoints,
+        bounds,
         dotPosition: data.dotPosition,
-        showDot: hasGpsPosition,
-        trackSpeeds: data.trackSpeeds,
-        trackCts: data.trackCts,
+        showDot,
+        trackSpeeds,
+        trackCts,
         speedBounds: data.speedBounds,
-        coloredTrackImage: data.coloredTrackImage,
+        coloredTrackImage,
         ghostPosition: data.ghostPosition,
         apexPositions: data.apexPositions
       })
       return
+    }
     case 'speedometerAnalog':
       if (!hasGpsPosition) return
       drawSpeedometerAnalog(ctx, { rect, style: widget.style, speedMps: data.speedMps, fontFamily })

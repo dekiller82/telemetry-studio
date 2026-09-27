@@ -145,7 +145,7 @@ function computeHeadingComponents(samples: TelemetrySample[], trackPoints: Proje
   return components
 }
 
-function computeBounds(points: ProjectedPoint[]): TrackBounds {
+export function computeBounds(points: ProjectedPoint[]): TrackBounds {
   if (points.length === 0) return { minX: 0, maxX: 0, minY: 0, maxY: 0 }
   let minX = points[0].x
   let maxX = points[0].x
@@ -174,6 +174,34 @@ function computeCumulativeDistanceM(samples: TelemetrySample[]): number[] {
     cumDistanceM[i] = cum
   }
   return cumDistanceM
+}
+
+/** Filters trackPoints/trackCts/trackSpeeds (1:1 index-aligned, as createTelemetrySampler produces
+ *  them) down to just the samples within [trimStartMs, trimEndMs] -- used by the GPS Track widget's
+ *  `trimAware` style option to crop the drawn overview shape/bounds to just the trimmed/exported
+ *  range, e.g. to exclude a bad-GPS opening stretch (parked under a roof, sitting on the grid) that
+ *  was trimmed out of the video. Reuses the SAME projected (x,y) coordinates the full track already
+ *  computed rather than re-projecting a subset -- keeps this exactly in the same coordinate frame as
+ *  the live dot position (which is interpolated against the full, untrimmed track), just a smaller
+ *  slice of it. */
+export function trimTrack(
+  trackPoints: ProjectedPoint[],
+  trackCts: number[],
+  trackSpeeds: number[],
+  trimStartMs: number,
+  trimEndMs: number
+): { trackPoints: ProjectedPoint[]; trackCts: number[]; trackSpeeds: number[] } {
+  const outPoints: ProjectedPoint[] = []
+  const outCts: number[] = []
+  const outSpeeds: number[] = []
+  for (let i = 0; i < trackCts.length; i++) {
+    if (trackCts[i] >= trimStartMs && trackCts[i] <= trimEndMs) {
+      outPoints.push(trackPoints[i])
+      outCts.push(trackCts[i])
+      outSpeeds.push(trackSpeeds[i])
+    }
+  }
+  return { trackPoints: outPoints, trackCts: outCts, trackSpeeds: outSpeeds }
 }
 
 function computeSpeedBounds(speeds: number[]): { min: number; max: number } {

@@ -64,6 +64,13 @@ export interface GpsWidgetStyle {
   apexMarkerColor: string
   apexMinDropMps: number
   apexMinGapMs: number
+  /** When true, the drawn track shape/bounds (and the dot's visibility) are cropped to just the
+   *  project's trim range instead of the whole recording -- lets a bad-GPS stretch (e.g. parked
+   *  under a roof, sitting on the grid before heading out) be excluded from the map by trimming it
+   *  out of the video, rather than needing the GPS filter itself to detect it. On by default: with
+   *  no trim set (the common case), trimStartMs/trimEndMs already span the whole recording, so this
+   *  is a no-op until the user actually trims something. */
+  trimAware: boolean
 }
 
 export const DEFAULT_GPS_STYLE: GpsWidgetStyle = {
@@ -87,7 +94,8 @@ export const DEFAULT_GPS_STYLE: GpsWidgetStyle = {
   showApexMarkers: false,
   apexMarkerColor: '#ffd60a',
   apexMinDropMps: 8,
-  apexMinGapMs: 1500
+  apexMinGapMs: 1500,
+  trimAware: true
 }
 
 /** The bounds to actually project against for this frame -- the full track's own bounds in 'full'

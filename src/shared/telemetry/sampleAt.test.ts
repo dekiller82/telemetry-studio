@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ImuSample, TelemetryData, TelemetrySample } from '../types'
-import { createTelemetrySampler } from './sampleAt'
+import { createTelemetrySampler, trimTrack } from './sampleAt'
 
 function makeSample(cts: number, overrides: Partial<TelemetrySample> = {}): TelemetrySample {
   return { cts, lat: 51.5, lon: -0.1, altitude: 0, speed2D: 0, speed3D: 0, ...overrides }
@@ -317,5 +317,35 @@ describe('createTelemetrySampler headingAt (Compass widget)', () => {
   it('returns 0 for an empty sample array without throwing', () => {
     const sampler = createTelemetrySampler(makeTelemetry([]))
     expect(sampler.headingAt(1000)).toBe(0)
+  })
+})
+
+describe('trimTrack', () => {
+  const trackPoints = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }, { x: 4, y: 4 }]
+  const trackCts = [0, 1000, 2000, 3000, 4000]
+  const trackSpeeds = [10, 11, 12, 13, 14]
+
+  it('keeps only samples within [trimStartMs, trimEndMs], inclusive', () => {
+    const result = trimTrack(trackPoints, trackCts, trackSpeeds, 1000, 3000)
+    expect(result.trackCts).toEqual([1000, 2000, 3000])
+    expect(result.trackPoints).toEqual([{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }])
+    expect(result.trackSpeeds).toEqual([11, 12, 13])
+  })
+
+  it('reuses the exact same point objects rather than re-projecting them', () => {
+    const result = trimTrack(trackPoints, trackCts, trackSpeeds, 1000, 3000)
+    expect(result.trackPoints[0]).toBe(trackPoints[1])
+  })
+
+  it('returns empty arrays when the trim range excludes every sample', () => {
+    const result = trimTrack(trackPoints, trackCts, trackSpeeds, 10000, 20000)
+    expect(result.trackPoints).toEqual([])
+    expect(result.trackCts).toEqual([])
+    expect(result.trackSpeeds).toEqual([])
+  })
+
+  it('keeps everything when the trim range covers the whole track', () => {
+    const result = trimTrack(trackPoints, trackCts, trackSpeeds, 0, 4000)
+    expect(result.trackCts).toEqual(trackCts)
   })
 })
