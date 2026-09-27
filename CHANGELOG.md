@@ -2,6 +2,23 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.25] - 2026-09-27
+
+### Fixed
+- **Export could hang indefinitely (or crash on a more memory-constrained machine) when the trim
+  range fell entirely within a middle clip of a multi-clip project** — e.g. exporting a short
+  highlight from partway through a long multi-chapter session. The ffmpeg filter graph only ever
+  applied trim to the array's first and last clip, on the assumption trim could only shave time off
+  the very start/end of the whole sequence; a trim window set inside a middle clip fell through that
+  assumption entirely, silently including every OTHER clip in the project untrimmed and forcing
+  ffmpeg to decode and concatenate the whole session merely to discard almost all of it. This is
+  very likely the real root cause of both the 5.3K "crash" reported on GitHub and this project's own
+  "hangs on frame 10, Cancel takes forever" report — corrects the 0.1.24 changelog's "Known
+  limitations" entry, which attributed it to an unconfirmed native-rendering-crash theory. Reproduced
+  directly against a real 4-clip project and confirmed fixed: an export that previously never
+  finished now completes in under 90 seconds, with the output's actual duration matching the
+  requested trim window exactly.
+
 ## [0.1.24] - 2026-09-27
 
 ### Added
@@ -53,7 +70,9 @@ All notable changes to Telemetry Studio are documented here.
   rendering runs in the app's own main process, so a native rendering crash there would take the
   whole app down with it, but this hasn't been reproduced/profiled on the affected hardware. A
   warning now appears before this situation (see Added, above); the underlying crash itself is
-  still open.
+  still open. **Update, 0.1.25: very likely the same bug fixed in 0.1.25** (see its Fixed entry) —
+  the native-rendering-crash theory above was never confirmed and was probably wrong; reopen if a
+  5.3K crash still occurs on 0.1.25 with a trim range that spans the whole clip.
 
 ## [0.1.23] - 2026-08-04
 
