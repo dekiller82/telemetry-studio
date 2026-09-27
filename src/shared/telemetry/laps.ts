@@ -1,9 +1,9 @@
-import type { TelemetrySample, LatLon, CrossingAdjustments } from '../types'
+import type { TelemetrySample, LatLon, CrossingAdjustments, CrossingIgnoreSet } from '../types'
 import { findBracketIndex } from './interpolate'
 
 // Re-exported for existing call sites -- canonical definitions live in shared/types.ts since both
 // are persisted in ProjectPayload/the project file schema, not just used by lap detection.
-export type { LatLon, CrossingAdjustments }
+export type { LatLon, CrossingAdjustments, CrossingIgnoreSet }
 
 export interface LapHistoryEntry {
   lapNumber: number
@@ -27,7 +27,10 @@ export interface LapState {
 }
 
 const EARTH_RADIUS_M = 6371000
-const DEFAULT_THRESHOLD_METERS = 15
+/** Default start/finish detection radius, meters -- overridable per-project via
+ *  ProjectPayload.startFinishRadiusM (see shared/types.ts) since how close a track's OWN layout
+ *  passes near the line, and GPS accuracy, both vary a lot by track/session. */
+export const DEFAULT_THRESHOLD_METERS = 15
 const DEFAULT_MIN_LAP_MS = 10000
 // Raised from an earlier cap of 5 to comfortably cover the F1-style timing tower's configurable
 // row count (property panel caps that at 20) -- cheap either way, this loop is O(min(laps, cap)).
@@ -71,17 +74,10 @@ function applyCrossingAdjustments(rawCrossings: number[], adjustments: CrossingA
  * Detects start/finish crossings as local minima in distance-to-point that dip under
  * `thresholdMeters`, requiring at least `minLapMs` between consecutive crossings so a slow
  * pass near the line (or GPS noise) doesn't register as multiple laps. Heuristic, not a proper
- * timing loop -- tune the threshold if a track's pit/paddock passes close to the line.
- *
- * `adjustments` applies manual per-crossing corrections (see CrossingAdjustments) after detection.
+ * timing loop -- tune the threshold (ProjectPayload.startFinishRadiusM) if a track's own layout
+ * (pit lane, a hairpin, a paddock road) passes close to the line at some OTHER point on track.
  */
-export function detectLapCrossings(
-  samples: TelemetrySample[],
-  startFinish: LatLon,
-  thresholdMeters = DEFAULT_THRESHOLD_METERS,
-  minLapMs = DEFAULT_MIN_LAP_MS,
-  adjustments: CrossingAdjustments = {}
-): number[] {
+function detectRawLapCrossings(samples: TelemetrySample[], startFinish: LatLon, thresholdMeters: number, minLapMs: number): number[] {
   if (samples.length < 3) return []
 
   const distances = samples.map((s) => distanceMeters(s, startFinish))
@@ -98,7 +94,55 @@ export function detectLapCrossings(
       }
     }
   }
-  return applyCrossingAdjustments(crossings, adjustments)
+  return crossings
+}
+
+export interface DetectedCrossing {
+  /** Nudge-adjusted video time, ms (see CrossingAdjustments). */
+  cts: number
+  /** Stable identity for this crossing: its index in the RAW, unadjusted detection order. This is
+   *  what CrossingAdjustments/CrossingIgnoreSet are keyed by -- stable as long as the underlying
+   *  samples/startFinish/thresholdMeters/minLapMs don't change, regardless of which OTHER
+   *  crossings have since been nudged or manually deleted. */
+  rawIndex: number
+  /** True if the user manually deleted this crossing (a false lap) -- excluded from
+   *  detectLapCrossings' own return value, but still reported here so a UI can show/restore it. */
+  ignored: boolean
+}
+
+/** Like detectLapCrossings, but reports EVERY detected crossing (including manually-deleted ones)
+ *  together with its stable rawIndex, for a UI that needs to let the user delete/restore a
+ *  specific one -- see Timeline.tsx. Every other consumer (lap timing, widgets, export) wants the
+ *  plain filtered list and should keep using detectLapCrossings. */
+export function detectLapCrossingsDetailed(
+  samples: TelemetrySample[],
+  startFinish: LatLon,
+  thresholdMeters = DEFAULT_THRESHOLD_METERS,
+  minLapMs = DEFAULT_MIN_LAP_MS,
+  adjustments: CrossingAdjustments = {},
+  ignoredCrossings: CrossingIgnoreSet = {}
+): DetectedCrossing[] {
+  const raw = detectRawLapCrossings(samples, startFinish, thresholdMeters, minLapMs)
+  const adjusted = applyCrossingAdjustments(raw, adjustments)
+  return adjusted.map((cts, rawIndex) => ({ cts, rawIndex, ignored: Boolean(ignoredCrossings[String(rawIndex)]) }))
+}
+
+/**
+ * `adjustments` applies manual per-crossing time corrections (see CrossingAdjustments) after
+ * detection; `ignoredCrossings` then drops any crossing the user manually marked as a false lap
+ * (see CrossingIgnoreSet) -- both keyed by the same raw detection-order index (DetectedCrossing.rawIndex).
+ */
+export function detectLapCrossings(
+  samples: TelemetrySample[],
+  startFinish: LatLon,
+  thresholdMeters = DEFAULT_THRESHOLD_METERS,
+  minLapMs = DEFAULT_MIN_LAP_MS,
+  adjustments: CrossingAdjustments = {},
+  ignoredCrossings: CrossingIgnoreSet = {}
+): number[] {
+  return detectLapCrossingsDetailed(samples, startFinish, thresholdMeters, minLapMs, adjustments, ignoredCrossings)
+    .filter((c) => !c.ignored)
+    .map((c) => c.cts)
 }
 
 /** Lap durations between consecutive crossings; the out-lap before the first crossing is excluded. */

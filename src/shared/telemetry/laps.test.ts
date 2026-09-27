@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TelemetrySample } from '../types'
-import { detectLapCrossings, fastestLapRange, getLapStateAt, lapTimesFromCrossings, nearestLatLon } from './laps'
+import { detectLapCrossings, detectLapCrossingsDetailed, fastestLapRange, getLapStateAt, lapTimesFromCrossings, nearestLatLon } from './laps'
 // Numbering convention under test: the first crossing (e.g. the moment the user scrubs to the
 // line and marks it) starts Lap 1 immediately -- there's no separate untimed "Lap 0/out-lap"
 // segment before it, so setting the start/finish never appears to "jump to Lap 2" right away.
@@ -101,6 +101,54 @@ describe('detectLapCrossings', () => {
       const withoutParam = detectLapCrossings(samples, startFinish, 15, 5000)
       expect(withEmpty).toEqual(withoutParam)
     })
+  })
+
+  describe('manually deleting a false lap (ignoredCrossings)', () => {
+    it('excludes a deleted crossing from the returned list, keeping the others', () => {
+      const samples = makeLoopedSamples(4, 30000, 200)
+      const raw = detectLapCrossings(samples, startFinish, 15, 5000)
+      const withDeletion = detectLapCrossings(samples, startFinish, 15, 5000, {}, { '1': true })
+      expect(withDeletion).toEqual([raw[0], raw[2], raw[3]])
+    })
+
+    it('deleting a crossing does not renumber the raw index of any other crossing', () => {
+      // Deleting crossing 1 must not shift crossing 2's own identity to "1" -- a later nudge/delete
+      // keyed by rawIndex 2 should keep targeting what was originally crossing 2.
+      const samples = makeLoopedSamples(4, 30000, 200)
+      const raw = detectLapCrossings(samples, startFinish, 15, 5000)
+      const result = detectLapCrossings(samples, startFinish, 15, 5000, { '2': 100 }, { '1': true })
+      expect(result).toEqual([raw[0], raw[2] + 100, raw[3]])
+    })
+
+    it('an empty ignoredCrossings object is a no-op', () => {
+      const samples = makeLoopedSamples(4, 30000, 200)
+      const withEmpty = detectLapCrossings(samples, startFinish, 15, 5000, {}, {})
+      const withoutParam = detectLapCrossings(samples, startFinish, 15, 5000)
+      expect(withEmpty).toEqual(withoutParam)
+    })
+  })
+})
+
+describe('detectLapCrossingsDetailed', () => {
+  const startFinish = { lat: 51.5, lon: -0.1 }
+
+  it('reports every detected crossing with its stable rawIndex and ignored flag', () => {
+    const samples = makeLoopedSamples(3, 30000, 200)
+    const detailed = detectLapCrossingsDetailed(samples, startFinish, 15, 5000, {}, { '1': true })
+    expect(detailed.map((c) => c.rawIndex)).toEqual([0, 1, 2])
+    expect(detailed.map((c) => c.ignored)).toEqual([false, true, false])
+  })
+
+  it('filtering out ignored entries and mapping to cts matches plain detectLapCrossings', () => {
+    const samples = makeLoopedSamples(3, 30000, 200)
+    const ignored = { '1': true }
+    const detailed = detectLapCrossingsDetailed(samples, startFinish, 15, 5000, {}, ignored)
+    const plain = detectLapCrossings(samples, startFinish, 15, 5000, {}, ignored)
+    expect(
+      detailed
+        .filter((c) => !c.ignored)
+        .map((c) => c.cts)
+    ).toEqual(plain)
   })
 })
 
