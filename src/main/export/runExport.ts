@@ -106,14 +106,32 @@ function scaleSuffixIfNeeded(clip: ClipInfo, settings: ExportSettings): string {
 }
 
 /**
+ * Which of the project's clips actually contribute frames to [trimStartMs, trimEndMs] -- a clip
+ * entirely outside the trim window is skipped as an ffmpeg input altogether, not just trimmed to
+ * zero output. Trim can fall anywhere on the combined timeline, including entirely within one
+ * middle clip (e.g. exporting a short highlight from partway through a long multi-chapter
+ * session) -- feeding ffmpeg every clip regardless of overlap forces it to decode and concatenate
+ * far more footage than the actual export range (in the worst case, most of the whole session)
+ * merely to discard almost all of it, and badly misaligns the overlay besides: the overlay pipe
+ * only ever emits `totalFrames` worth of frames starting at trimStartMs, but the concatenated main
+ * stream's own frame 0 would still be whichever untrimmed clip came first in the array.
+ */
+export function clipsOverlappingTrim(clips: ClipInfo[], trimStartMs: number, trimEndMs: number): ClipInfo[] {
+  return clips.filter((clip) => {
+    const clipEndMs = clip.startOffsetMs + clip.video.durationMs
+    return clipEndMs > trimStartMs && clip.startOffsetMs < trimEndMs
+  })
+}
+
+/**
  * Builds the full ffmpeg args for one encoder attempt. Three shapes, matched 1:1 to real CLI
  * verification done before this was wired in (see project memory) -- particularly the `-frames:v`
  * cap, which is NOT optional: ffmpeg's trim/concat filters can land on a frame count one off from
  * our own authoritative count due to boundary rounding, and the overlay filter pads with a
  * duplicated last frame to match whichever stream is longer if left uncapped.
  */
-function buildFfmpegArgs(
-  clips: ClipInfo[],
+export function buildFfmpegArgs(
+  allClips: ClipInfo[],
   settings: ExportSettings,
   trimStartMs: number,
   trimEndMs: number,
@@ -121,6 +139,11 @@ function buildFfmpegArgs(
   encoder: VideoEncoder,
   outputPath: string
 ): string[] {
+  // Only clips the trim range actually overlaps are fed to ffmpeg at all -- see
+  // clipsOverlappingTrim's own doc comment for why including every clip regardless was a real
+  // correctness/performance bug, not just wasteful. Every case below already handles "N clips"
+  // generically, so this is the only change needed -- it just needs the right subset.
+  const clips = clipsOverlappingTrim(allClips, trimStartMs, trimEndMs)
   const hasAudio = clips[0].video.hasAudio
   // When the selected encoder has a smoke-tested decodeHwaccel (see gpuEncoder.ts), every clip's
   // decode is offloaded to the GPU too -- otherwise only the final encode runs on the GPU while
