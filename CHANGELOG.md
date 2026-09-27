@@ -5,16 +5,18 @@ All notable changes to Telemetry Studio are documented here.
 ## [0.1.25] - 2026-09-27
 
 ### Fixed
-- **Export could hang indefinitely (or crash on a more memory-constrained machine) when the trim
-  range fell entirely within a middle clip of a multi-clip project** — e.g. exporting a short
-  highlight from partway through a long multi-chapter session. The ffmpeg filter graph only ever
-  applied trim to the array's first and last clip, on the assumption trim could only shave time off
-  the very start/end of the whole sequence; a trim window set inside a middle clip fell through that
-  assumption entirely, silently including every OTHER clip in the project untrimmed and forcing
-  ffmpeg to decode and concatenate the whole session merely to discard almost all of it. This is
-  very likely the real root cause of both the 5.3K "crash" reported on GitHub and this project's own
-  "hangs on frame 10, Cancel takes forever" report — corrects the 0.1.24 changelog's "Known
-  limitations" entry, which attributed it to an unconfirmed native-rendering-crash theory.
+- **Export could hang indefinitely (or worse) when the trim range fell entirely within a middle
+  clip of a multi-clip project** — e.g. exporting a short highlight from partway through a long
+  multi-chapter session. The ffmpeg filter graph only ever applied trim to the array's first and
+  last clip, on the assumption trim could only shave time off the very start/end of the whole
+  sequence; a trim window set inside a middle clip fell through that assumption entirely, silently
+  including every OTHER clip in the project untrimmed and forcing ffmpeg to decode and concatenate
+  the whole session merely to discard almost all of it. Confirmed as the cause of this project's own
+  "hangs on frame 10, Cancel takes forever" report on a *trimmed* multi-clip export. **Does not
+  appear to be the same failure as the 5.3K "crash" originally reported on GitHub** — that export
+  looks to have been full/untrimmed, a code path this bug never touched — so that report remains
+  open; see Known limitations below (this replaces the unconfirmed native-rendering-crash theory
+  0.1.24 originally listed there, which is also not confirmed).
 - **A smaller version of the same class of bug remained even for a correctly-selected single clip**:
   the trim's own start point (however deep into that one clip) was still applied as a filter-graph
   trim, which decodes and discards every frame from the clip's own beginning up to the trim point
@@ -26,6 +28,15 @@ All notable changes to Telemetry Studio are documented here.
   4-clip project end to end: the export that previously never finished now completes in under 90
   seconds with no perceptible pause, and the output's actual duration matches the requested trim
   window exactly.
+
+### Known limitations
+- **The original 5.3K export crash reported on GitHub is still open.** Both Fixed entries above were
+  investigated specifically because they produce a very similar symptom (export stalls a few frames
+  in), but the reporter's own export appears to have been a full, untrimmed multi-clip session —
+  verified directly that a full/untrimmed multi-clip export (no trim at all) has no equivalent stall
+  on the hardware available for testing here, so these two fixes don't explain their crash. Root
+  cause still unconfirmed; needs either their real project file, or a reproduction on similar
+  (Apple Silicon, 5.3K source) hardware.
 
 ## [0.1.24] - 2026-09-27
 
@@ -74,13 +85,12 @@ All notable changes to Telemetry Studio are documented here.
 ### Known limitations
 - **Export can crash on very high native resolution (5.3K+) source video on some systems**,
   reported on a Mac mini M4 (Apple Silicon) as an outright crash with no error dialog; downscaling
-  via a delivery preset (e.g. YouTube 4K) works around it. Root cause not yet confirmed — frame
-  rendering runs in the app's own main process, so a native rendering crash there would take the
-  whole app down with it, but this hasn't been reproduced/profiled on the affected hardware. A
-  warning now appears before this situation (see Added, above); the underlying crash itself is
-  still open. **Update, 0.1.25: very likely the same bug fixed in 0.1.25** (see its Fixed entry) —
-  the native-rendering-crash theory above was never confirmed and was probably wrong; reopen if a
-  5.3K crash still occurs on 0.1.25 with a trim range that spans the whole clip.
+  via a delivery preset (e.g. YouTube 4K) works around it. Root cause not yet confirmed. **Update,
+  0.1.25**: two real, related bugs were found and fixed in 0.1.25 (see its Fixed entries) that
+  produce a very similar symptom (a stall a few frames into export) — but the reporter's own export
+  looks to have been a full, untrimmed multi-clip session, a code path neither 0.1.25 fix actually
+  touches, so this is likely still a separate, real issue. Still open; see 0.1.25's own Known
+  limitations entry.
 
 ## [0.1.23] - 2026-08-04
 
