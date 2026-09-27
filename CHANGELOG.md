@@ -2,6 +2,59 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.1.24] - 2026-09-27
+
+### Added
+- **Automatic GoPro chapter ordering and validation on import** — clips are now put in the correct
+  chapter order automatically (`GH01`/`GH02`/... or the older `GOPR`/`GP01`/... naming) instead of
+  relying on whatever order the file picker happens to return, and a selection that mixes clips from
+  two different recordings, or is missing a chapter, is rejected with a clear message instead of
+  silently producing a broken timeline.
+- **Automatic GPS noise filtering** — a physically-implausible GPS position jump (inconsistent with
+  the speed the camera itself reported at that moment) is now detected and removed before it reaches
+  the map/track widgets. Short isolated spikes are bridged (both good sides kept, stitched together);
+  a longer bad stretch is only discarded outright when a clearly dominant, trustworthy segment
+  remains, so a genuinely ambiguous recording is left intact rather than guessed at.
+- **GPS-dependent widgets blank out outside the trustworthy GPS range** — the speedometer, compass,
+  elevation, distance, and map dot now go blank for any moment the GPS filtering above discarded,
+  instead of showing a frozen, misleadingly "current" value from before the gap.
+- **Adjustable start/finish detection radius, and manual lap delete/restore** — if your track's own
+  layout passes close to the line somewhere that isn't the actual line (a pit lane, a hairpin), a
+  false lap could get detected. The detection radius is now adjustable per project (Property Panel,
+  3–40m), and any detected lap can be deleted directly from its timeline marker if one still slips
+  through — excluded from lap/sector timing everywhere (preview and export alike), and kept visible
+  (dimmed) so it can be restored if deleted by mistake.
+- **GPS Track widget: "Crop map to trimmed range"** (on by default) — draws only the GPS between
+  your trim start/end points instead of the whole recording, so a bad-GPS stretch outside the
+  exported range (e.g. parked under cover before heading out) doesn't show up on the map, without
+  needing to also cut it out of the exported video.
+- **Warning before exporting a very high native resolution source** — a banner (with a one-click
+  switch to the YouTube 4K preset) appears when the source is above 4K and "Source quality" export
+  is selected, since a very high native resolution (5.3K+) has been reported to crash export
+  outright on some systems. This is a warning, not a fix for the underlying crash, which is still
+  unresolved — see Known limitations.
+
+### Fixed
+- **Rapid timeline scrubbing could overwhelm the video decoder and make the app lag behind the
+  mouse.** Dragging the scrub bar now updates the playhead and every widget instantly, but the
+  actual (expensive) decoder seek is throttled to the latest position you dragged to, waiting for
+  the decoder to actually be ready before issuing the next one.
+- **Reimporting a project whose first clip happened to share a file path with the previous project
+  didn't reset playback state**, leaving stale seek/proxy data from the old project active in the
+  new one.
+- **Importing multiple clips failed outright if just one of them (commonly the first chapter,
+  recorded before the GPS module had locked on) had no GPS fix yet**, rejecting the whole batch even
+  when every other clip's GPS was fine. That one clip now just contributes a blank stretch instead.
+
+### Known limitations
+- **Export can crash on very high native resolution (5.3K+) source video on some systems**,
+  reported on a Mac mini M4 (Apple Silicon) as an outright crash with no error dialog; downscaling
+  via a delivery preset (e.g. YouTube 4K) works around it. Root cause not yet confirmed — frame
+  rendering runs in the app's own main process, so a native rendering crash there would take the
+  whole app down with it, but this hasn't been reproduced/profiled on the affected hardware. A
+  warning now appears before this situation (see Added, above); the underlying crash itself is
+  still open.
+
 ## [0.1.23] - 2026-08-04
 
 ### Fixed

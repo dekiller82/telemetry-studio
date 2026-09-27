@@ -22,7 +22,15 @@ speedometer widgets running together over real footage.
 
 - **Multi-clip import** — select every part of a chapter-split GoPro recording
   (`GH010230.MP4`, `GH020230.MP4`, ...) at once; they're stitched into a single timeline with
-  continuous telemetry.
+  continuous telemetry. Chapters are automatically put in the right order and validated (rejecting
+  a selection that mixes clips from two different recordings, or is missing a chapter) instead of
+  relying on whatever order the file picker happens to return. A clip with no GPS fix yet (commonly
+  the very first chapter, started before the GPS module locked) no longer blocks the rest of the
+  import — it just contributes a blank stretch on GPS-driven widgets for its own duration.
+- **Automatic GPS noise filtering** — physically-implausible GPS position jumps (a sudden snap
+  inconsistent with the reported speed) are detected and removed before they reach the map/track
+  widgets, bridging short isolated spikes and only discarding a longer bad stretch when a clearly
+  dominant, trustworthy segment remains.
 - **18 widgets** (17 telemetry-driven, plus a freeform text/logo widget), each fully configurable
   (colors, fonts, size, smoothing) via the property panel — see [Widgets](#widgets) below for what
   each one shows and its own options.
@@ -50,6 +58,12 @@ speedometer widgets running together over real footage.
   crossing a few frames early or late on a given lap; click a lap marker on the timeline to select
   it, then nudge it ±1 frame with a live offset readout and a Reset button. Every widget, live
   preview and export alike, reflects the correction immediately.
+- **Adjustable start/finish detection radius, and manual lap delete/restore** — if your track's own
+  layout passes close to the line somewhere that isn't the actual line (a pit lane, a hairpin), a
+  false lap can get detected; tighten the detection radius (Property Panel, 3–40m) to stop it from
+  happening, or click any lap marker on the timeline and delete it directly if one still slips
+  through. A deleted lap is excluded from lap/sector timing everywhere (preview and export alike)
+  and stays visible, dimmed, so it can be restored if you change your mind.
 - **Select all** — Ctrl/Cmd+A selects every widget on the canvas, ready for group move/align/delete.
 - **Drag/resize/rotate** every widget directly on the video preview; live preview matches the
   final export exactly.
@@ -59,7 +73,9 @@ speedometer widgets running together over real footage.
   before/after) — doesn't touch your project's actual saved trim range.
 - **Delivery presets** — a dropdown next to Export Video bundles resolution + bitrate for YouTube
   (4K/1080p), Instagram/TikTok/Reels, and Twitter/X, alongside the default native-resolution
-  "Source quality" export.
+  "Source quality" export. A warning appears (with a one-click switch to the 4K preset) if your
+  source's native resolution is above 4K and "Source quality" is selected, since very high
+  resolutions have been reported to crash export on some systems.
 - **Recent Projects** list on the start screen for one-click reopening of your last 10
   opened/saved projects.
 - **Project files** (`.gpo`) save the full editing state (imported clips, widgets, trim, start/finish
@@ -97,7 +113,10 @@ Lap/sector-dependent widgets all key off the single start/finish point you place
   lap's own position at the same elapsed time into its lap, once one exists to compare against —
   a real spatial ahead/behind gap, not just a number. A **zoomed window view mode** keeps the
   current position centered and zoomed in to an adjustable radius instead of always fitting the
-  whole track to the widget, so a close gap to the ghost marker is actually visible.
+  whole track to the widget, so a close gap to the ghost marker is actually visible. **Crop map to
+  trimmed range** (on by default) draws only the GPS between your trim start/end points instead of
+  the whole recording — trim off a bad-GPS stretch (e.g. parked under cover before heading out) and
+  it disappears from the map too, without needing to cut it from the exported video separately.
 
 - **Speedometer (analog & digital)** — current speed in km/h or mph, Gaussian-smoothed to damp GPS
   jitter (smoothing window is adjustable). The analog gauge has its own configurable min/max scale;
