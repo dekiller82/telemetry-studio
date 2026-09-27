@@ -145,15 +145,29 @@ export function buildFfmpegArgs(
   // generically, so this is the only change needed -- it just needs the right subset.
   const clips = clipsOverlappingTrim(allClips, trimStartMs, trimEndMs)
   const hasAudio = clips[0].video.hasAudio
+  // How far into the FIRST active clip's own timeline the trim range actually starts -- applied as
+  // an INPUT seek (`-ss` before that clip's `-i`) below rather than a `trim=start=` filter. A
+  // filter-graph trim only discards frames after decoding them, so a start offset deep into a clip
+  // (e.g. exporting a highlight from a few minutes into a long recording) forced ffmpeg to decode
+  // every single frame from that clip's own beginning up to the trim point just to throw them away
+  // -- confirmed directly on a real 4K clip: ~19s for a 144s throwaway prefix via the old
+  // filter-based trim, vs ~0.4s via `-ss` input seeking, for byte-identical output frames (ffmpeg's
+  // own "accurate seek" default decodes from the nearest preceding keyframe and discards internally,
+  // not a lossy/imprecise keyframe-only seek). This is exactly what surfaced as a many-second pause
+  // a few frames into export -- our own render+write loop easily outpaces ffmpeg's decode of that
+  // throwaway prefix on the OTHER (real video) input, filling ffmpeg's small internal pipe queue
+  // and blocking until the prefix finishes decoding the slow way.
+  const firstClipSeekSec = clipLocalSeconds(clips[0], trimStartMs)
   // When the selected encoder has a smoke-tested decodeHwaccel (see gpuEncoder.ts), every clip's
   // decode is offloaded to the GPU too -- otherwise only the final encode runs on the GPU while
   // software-decoding the source clip(s) on CPU becomes the real bottleneck. Must be repeated
   // before EACH input, not once globally.
   const inputArgs: string[] = []
-  for (const clip of clips) {
+  clips.forEach((clip, i) => {
     if (encoder.decodeHwaccel) inputArgs.push('-hwaccel', encoder.decodeHwaccel)
+    if (i === 0 && firstClipSeekSec > 0) inputArgs.push('-ss', String(firstClipSeekSec))
     inputArgs.push('-i', clip.video.path)
-  }
+  })
   const overlayInputIndex = clips.length // the rawvideo pipe is the input right after every clip input
 
   const lastClip = clips[clips.length - 1]
@@ -177,11 +191,13 @@ export function buildFfmpegArgs(
     audioCodecArgs = resolveStreamCopyableAudioArgs(settings)
   } else if (clips.length === 1) {
     // Case B: single clip, trimmed and/or resized for a delivery preset. Either reason forces a
-    // decode, so audio can't stay stream-copied.
-    const startSec = clipLocalSeconds(clips[0], trimStartMs)
-    const endSec = clipLocalSeconds(clips[0], trimEndMs)
-    const parts = [`[0:v]trim=start=${startSec}:end=${endSec},setpts=PTS-STARTPTS${scaleSuffixIfNeeded(clips[0], settings)}[vtrim]`]
-    if (hasAudio) parts.push(`[0:a]atrim=start=${startSec}:end=${endSec},asetpts=PTS-STARTPTS[atrim]`)
+    // decode, so audio can't stay stream-copied. The start offset is already applied via `-ss` on
+    // this clip's own input (see firstClipSeekSec above) -- only the END needs a filter-graph trim
+    // here, and relative to the SEEKED stream's own timeline (which restarts at ~0), not the clip's
+    // original one.
+    const endSec = Math.max(0, clipLocalSeconds(clips[0], trimEndMs) - firstClipSeekSec)
+    const parts = [`[0:v]trim=end=${endSec},setpts=PTS-STARTPTS${scaleSuffixIfNeeded(clips[0], settings)}[vtrim]`]
+    if (hasAudio) parts.push(`[0:a]atrim=end=${endSec},asetpts=PTS-STARTPTS[atrim]`)
     parts.push(`[${overlayInputIndex}:v]format=rgba[ov]`, '[vtrim][ov]overlay=0:0:format=auto[v]')
     filterComplex = parts.join(';')
     videoMapLabel = '[v]'
@@ -207,9 +223,10 @@ export function buildFfmpegArgs(
         segmentParts.push(`[${i}:v]trim=start=${startSec}:end=${endSec},setpts=PTS-STARTPTS${scaleSuffix}[${vLabel}]`)
         if (hasAudio) segmentParts.push(`[${i}:a]atrim=start=${startSec}:end=${endSec},asetpts=PTS-STARTPTS[${aLabel}]`)
       } else if (isFirst) {
-        const startSec = clipLocalSeconds(clip, trimStartMs)
-        segmentParts.push(`[${i}:v]trim=start=${startSec},setpts=PTS-STARTPTS${scaleSuffix}[${vLabel}]`)
-        if (hasAudio) segmentParts.push(`[${i}:a]atrim=start=${startSec},asetpts=PTS-STARTPTS[${aLabel}]`)
+        // Start offset already applied via `-ss` on this clip's own input (firstClipSeekSec) --
+        // no filter-graph start trim needed here, just the timestamp reset.
+        segmentParts.push(`[${i}:v]setpts=PTS-STARTPTS${scaleSuffix}[${vLabel}]`)
+        if (hasAudio) segmentParts.push(`[${i}:a]asetpts=PTS-STARTPTS[${aLabel}]`)
       } else if (isLast) {
         const endSec = clipLocalSeconds(clip, trimEndMs)
         segmentParts.push(`[${i}:v]trim=end=${endSec},setpts=PTS-STARTPTS${scaleSuffix}[${vLabel}]`)

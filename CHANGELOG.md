@@ -14,10 +14,18 @@ All notable changes to Telemetry Studio are documented here.
   ffmpeg to decode and concatenate the whole session merely to discard almost all of it. This is
   very likely the real root cause of both the 5.3K "crash" reported on GitHub and this project's own
   "hangs on frame 10, Cancel takes forever" report — corrects the 0.1.24 changelog's "Known
-  limitations" entry, which attributed it to an unconfirmed native-rendering-crash theory. Reproduced
-  directly against a real 4-clip project and confirmed fixed: an export that previously never
-  finished now completes in under 90 seconds, with the output's actual duration matching the
-  requested trim window exactly.
+  limitations" entry, which attributed it to an unconfirmed native-rendering-crash theory.
+- **A smaller version of the same class of bug remained even for a correctly-selected single clip**:
+  the trim's own start point (however deep into that one clip) was still applied as a filter-graph
+  trim, which decodes and discards every frame from the clip's own beginning up to the trim point
+  before any real output can start — confirmed directly to take ~19s for a 144s throwaway prefix on
+  a real 4K clip. Switched to an ffmpeg input seek (`-ss` before that clip's own `-i`) instead, which
+  decodes only from the nearest preceding keyframe — confirmed to produce byte-identical output
+  frames in ~0.4s instead. This is what remained as a brief (rather than indefinite) pause a few
+  frames into export after the first fix above. Both fixes verified directly against the same real
+  4-clip project end to end: the export that previously never finished now completes in under 90
+  seconds with no perceptible pause, and the output's actual duration matches the requested trim
+  window exactly.
 
 ## [0.1.24] - 2026-09-27
 

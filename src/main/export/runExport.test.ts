@@ -87,23 +87,51 @@ describe('buildFfmpegArgs multi-clip trim', () => {
     const inputFlags = args.filter((_, i) => args[i - 1] === '-i')
     expect(inputFlags).toEqual(['C:\\Gopro\\GH020254.MP4', 'pipe:0'])
 
-    // Both the start AND end trim apply to that single clip, relative to ITS OWN local time.
+    // The start offset (144.602s into this clip) is applied as a fast `-ss` INPUT seek, not a
+    // filter-graph trim -- a filter trim would decode the whole 144.602s prefix just to discard it
+    // (confirmed directly: ~19s that way vs ~0.4s via -ss, for byte-identical output frames). -ss
+    // must come before this clip's own -i.
+    const clipInputIndex = args.indexOf('C:\\Gopro\\GH020254.MP4')
+    expect(args[clipInputIndex - 1]).toBe('-i')
+    expect(args[clipInputIndex - 3]).toBe('-ss')
+    expect(args[clipInputIndex - 2]).toBe('144.602')
+
+    // Only the END trim remains as a filter, relative to the SEEKED stream's own timeline (which
+    // restarts at ~0): 206.518 - 144.602 = 61.916.
     const filterComplexIndex = args.indexOf('-filter_complex')
     const filterComplex = args[filterComplexIndex + 1]
-    expect(filterComplex).toContain('trim=start=144.602:end=206.518')
+    expect(filterComplex).toContain('trim=end=61.916')
+    expect(filterComplex).not.toContain('start=')
     expect(filterComplex).not.toContain('concat=')
   })
 
-  it('still concatenates just the overlapping subset when trim spans multiple clips', () => {
+  it('still concatenates just the overlapping subset when trim spans multiple clips, seeking into the first one', () => {
     const clips = fourClips()
     const args = buildFfmpegArgs(clips, settings, 250000, 650000, 12000, CPU_ENCODER, 'out.mp4')
 
     const inputFlags = args.filter((_, i) => args[i - 1] === '-i')
     expect(inputFlags).toEqual(['C:\\Gopro\\GH010254.MP4', 'C:\\Gopro\\GH020254.MP4', 'C:\\Gopro\\GH030254.MP4', 'pipe:0'])
 
+    // 250000ms is 250s into clip[0] -- seeked via -ss, same as the single-clip case.
+    const firstClipIndex = args.indexOf('C:\\Gopro\\GH010254.MP4')
+    expect(args[firstClipIndex - 1]).toBe('-i')
+    expect(args[firstClipIndex - 3]).toBe('-ss')
+    expect(args[firstClipIndex - 2]).toBe('250')
+
     const filterComplexIndex = args.indexOf('-filter_complex')
     const filterComplex = args[filterComplexIndex + 1]
     expect(filterComplex).toContain('concat=n=3')
+    // The first clip's own segment has no start= trim (handled by -ss above); the middle and last
+    // clips are unaffected by this fix.
+    expect(filterComplex).not.toContain('[0:v]trim=start=')
+  })
+
+  it('omits -ss entirely when the trim range starts exactly at a clip boundary (no prefix to skip)', () => {
+    const clips = fourClips()
+    // 300000ms is exactly clip[1]'s own start -- nothing to seek past.
+    const args = buildFfmpegArgs(clips, settings, 300000, 650000, 12000, CPU_ENCODER, 'out.mp4')
+    const firstClipIndex = args.indexOf('C:\\Gopro\\GH020254.MP4')
+    expect(args[firstClipIndex - 2]).not.toBe('-ss')
   })
 
   it('uses the original byte-for-byte single-clip path when the project genuinely has only one clip', () => {
@@ -111,5 +139,6 @@ describe('buildFfmpegArgs multi-clip trim', () => {
     const args = buildFfmpegArgs([clip], settings, 0, 300000, 9000, CPU_ENCODER, 'out.mp4')
     const filterComplexIndex = args.indexOf('-filter_complex')
     expect(args[filterComplexIndex + 1]).not.toContain('trim=')
+    expect(args).not.toContain('-ss')
   })
 })
