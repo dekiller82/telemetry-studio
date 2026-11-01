@@ -111,6 +111,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -121,11 +123,20 @@ jobs:
           find dist -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.yml' -o -name '*.blockmap' \) -exec cp {} out/ \;
           ls -la out
 
+      # Release notes are this version's own CHANGELOG.md section, so the changelog is what users
+      # see on the release page. Falls back to GitHub's generated notes only if no section matches.
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '/^## \[/ { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } } found' CHANGELOG.md | sed 's/\r$//' > release-notes.md
+          echo "release-notes.md: $(wc -l < release-notes.md) lines"
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ -s release-notes.md ]; then NOTES=(--notes-file release-notes.md); else NOTES=(--generate-notes); fi
           gh release create "${{ github.ref_name }}" out/* \
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
-            --generate-notes
+            "${NOTES[@]}"

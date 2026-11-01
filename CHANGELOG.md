@@ -2,6 +2,47 @@
 
 All notable changes to Telemetry Studio are documented here.
 
+## [0.2.0] - 2026-11-01
+
+### Changed
+- **Exports are substantially faster** (contributed by Michael-Han0608, PR #4). Overlay frames are now
+  drawn by two parallel render workers instead of one, in order and with backpressure so memory stays
+  bounded; unchanging layers (dial faces, grids, the full-lap speed graph) are drawn once and reused;
+  and the per-frame JavaScript alpha un-premultiply pass is gone (FFmpeg now reads premultiplied
+  alpha directly). Where the overlay doesn't cover the whole frame, only that region is composited.
+  In the contributor's benchmark (2704x1520 at 50 fps, 9 widgets, NVENC, RTX 4070 Laptop) a 20-second
+  export dropped from 43.9 s to 20.1 s with visually matching output (49.8 dB PSNR, not byte-identical);
+  a full 4K, 4-clip, 10:45 export with 6 widgets also completed on NVENC with CUDA decode here.
+  That speedup combines rendering, caching and decoding changes and is not a general 2x guarantee;
+  renderer memory use is higher (about 405 MiB vs 235 MiB in that benchmark).
+- **GPU decoding is now verified before it is used.** On machines with many CPU threads, asking for
+  CUDA decode could exceed the GPU's decoder surface limit and silently fall back to slow software
+  decoding while still looking like a GPU export. The app now probes the actual source clips for a
+  real CUDA frame, caps CUDA decoder threads at four, and keeps NVENC encoding with software decode
+  if the probe fails.
+- **Exports now write to a temporary file and only replace the destination when finished.**
+  Cancelling an export keeps whatever file was already at that path (previously a cancel deleted
+  it), and a failed or cancelled export leaves no partial file behind. The app also now refuses to
+  export over any of the imported source videos, including excluded chapters, differently-spelled
+  Windows paths, and hard links.
+- Each export attempt now logs one compact performance profile (encoder, decode status, render and
+  write timings); see `docs/export-performance.md`.
+
+### Fixed
+- **A full disk during export was mistaken for a GPU failure.** FFmpeg's "No space left on device"
+  line names the encoder (`h264_nvenc`), so the hardware-failure check treated it as an NVENC fault
+  and restarted the whole export on the CPU, which then ran out of space again. It now stops
+  immediately, removes the partial file, and shows a "not enough disk space" message naming the
+  drive to free up.
+- Packaged builds now include only the production output folders (`out/main`, `out/preload`,
+  `out/renderer`), including the new render-worker chunk.
+
+### Known limitations
+- Long full sessions, real chapter boundaries, packaged installers, and Intel/AMD/macOS hardware
+  exports are not validated for the new export pipeline. CPU canvas drawing and FFmpeg's CPU
+  `overlay` compositor are still used.
+- The original 5.3K export crash reported on GitHub is still open (unchanged from 0.1.25).
+
 ## [0.1.25] - 2026-09-27
 
 ### Fixed
