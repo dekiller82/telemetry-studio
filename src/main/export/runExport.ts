@@ -1,10 +1,23 @@
-import { spawn } from 'child_process'
+import { spawn, type ChildProcessByStdio } from 'child_process'
+import { performance } from 'node:perf_hooks'
+import type { Readable, Writable } from 'node:stream'
 import ffmpegPathRaw from 'ffmpeg-static'
-import type { ClipInfo, CrossingAdjustments, CrossingIgnoreSet, LatLon, WidgetInstance } from '../../shared/types'
+import type { ClipInfo, CrossingAdjustments, CrossingIgnoreSet, LatLon, TelemetryData, WidgetInstance } from '../../shared/types'
 import type { TelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { createFrameRenderer } from './frameRenderer'
 import { selectVideoEncoder, CPU_ENCODER, type VideoEncoder } from './gpuEncoder'
 import { resolveUnpackedBinaryPath } from '../app/binaryPath'
+import { createExportJobId, ExportAttemptProfiler } from './exportProfiling'
+import { assertSafeExportOutput, attemptOutputPath, commitAttemptOutput, removeAttemptFile, ExportOutputRecoveryError } from './exportOutput'
+import { ExportCancelledError } from './exportCancellation'
+import { createExportProcessWaiter } from './exportProcessWaiter'
+import type { OverlayRoi } from './overlayRoi'
+import { createParallelFrameRenderer, type ExportFrameSource, type RenderedFrame } from './parallelFrameRenderer'
+import { getExportFontsDirectory } from './registerFonts'
+import { getExportIconsDirectory } from './loadIcons'
+import { CUDA_DECODE_THREADS, probeCudaInput } from './inputDecode'
+
+export { ExportCancelledError } from './exportCancellation'
 
 export interface ExportSettings {
   width: number
@@ -21,16 +34,8 @@ export interface ExportSettings {
    *  stream-copyable single-clip/no-trim case) so the delivery preset's audio bitrate is actually
    *  applied. Undefined (the default export) leaves audio untouched, exactly as before. */
   audioBitrateKbps?: number
-}
-
-/** Thrown when an export is stopped via a caller-provided AbortSignal (the user clicked Cancel) --
- *  distinguished from a genuine ffmpeg failure so callers don't show an "export failed" error, retry
- *  with a fallback encoder, or otherwise treat a deliberate stop as a crash. */
-export class ExportCancelledError extends Error {
-  constructor() {
-    super('Export cancelled')
-    this.name = 'ExportCancelledError'
-  }
+  /** Default: two bounded render workers. Set 1 for serial A/B validation or troubleshooting. */
+  renderWorkers?: 1 | 2
 }
 
 export interface RunExportOptions {
@@ -38,6 +43,8 @@ export interface RunExportOptions {
   outputPath: string
   widgets: WidgetInstance[]
   sampler: TelemetrySampler
+  /** Original data for independently constructing a sampler inside each frame worker. */
+  telemetry?: TelemetryData
   /** Shared by every widget that needs lap/sector detection. */
   startFinish: LatLon | null
   /** Start/finish detection radius, meters -- see shared/types.ts's ProjectPayload.startFinishRadiusM. */
@@ -55,7 +62,7 @@ export interface RunExportOptions {
   settings: ExportSettings
   onProgress?: (framesWritten: number, totalFrames: number) => void
   onEncoderSelected?: (label: string) => void
-  /** Checked once per frame; aborting kills the in-flight ffmpeg process and rejects with
+  /** Also interrupts pending Worker/pipe waits; aborting kills the in-flight ffmpeg process and rejects with
    *  ExportCancelledError instead of letting the frame loop run to completion. */
   signal?: AbortSignal
 }
@@ -105,6 +112,11 @@ function scaleSuffixIfNeeded(clip: ClipInfo, settings: ExportSettings): string {
   return clip.video.width === settings.width && clip.video.height === settings.height ? '' : `,scale=${settings.width}:${settings.height}`
 }
 
+/** Canvas.data() supplies premultiplied RGBA for all three export graph shapes. */
+function overlayFilter(mainLabel: string, outputLabel: string, roi: OverlayRoi): string {
+  return `[${mainLabel}][ov]overlay=${roi.x}:${roi.y}:format=auto:alpha=premultiplied[${outputLabel}]`
+}
+
 /**
  * Which of the project's clips actually contribute frames to [trimStartMs, trimEndMs] -- a clip
  * entirely outside the trim window is skipped as an ffmpeg input altogether, not just trimmed to
@@ -137,13 +149,15 @@ export function buildFfmpegArgs(
   trimEndMs: number,
   totalFrames: number,
   encoder: VideoEncoder,
-  outputPath: string
+  outputPath: string,
+  overlayRoi: OverlayRoi = { x: 0, y: 0, width: settings.width, height: settings.height }
 ): string[] {
   // Only clips the trim range actually overlaps are fed to ffmpeg at all -- see
   // clipsOverlappingTrim's own doc comment for why including every clip regardless was a real
   // correctness/performance bug, not just wasteful. Every case below already handles "N clips"
   // generically, so this is the only change needed -- it just needs the right subset.
   const clips = clipsOverlappingTrim(allClips, trimStartMs, trimEndMs)
+  if (clips.length === 0) throw new Error('No video clips overlap the export range')
   const hasAudio = clips[0].video.hasAudio
   // How far into the FIRST active clip's own timeline the trim range actually starts -- applied as
   // an INPUT seek (`-ss` before that clip's `-i`) below rather than a `trim=start=` filter. A
@@ -158,13 +172,12 @@ export function buildFfmpegArgs(
   // throwaway prefix on the OTHER (real video) input, filling ffmpeg's small internal pipe queue
   // and blocking until the prefix finishes decoding the slow way.
   const firstClipSeekSec = clipLocalSeconds(clips[0], trimStartMs)
-  // When the selected encoder has a smoke-tested decodeHwaccel (see gpuEncoder.ts), every clip's
-  // decode is offloaded to the GPU too -- otherwise only the final encode runs on the GPU while
-  // software-decoding the source clip(s) on CPU becomes the real bottleneck. Must be repeated
-  // before EACH input, not once globally.
+  // Decoder options belong before EACH input. CUDA also needs a bounded thread count: automatic
+  // threading can exceed NVDEC's decode-surface limit and silently fall back to software.
   const inputArgs: string[] = []
   clips.forEach((clip, i) => {
     if (encoder.decodeHwaccel) inputArgs.push('-hwaccel', encoder.decodeHwaccel)
+    if (encoder.decodeHwaccel === 'cuda') inputArgs.push('-threads', String(CUDA_DECODE_THREADS))
     if (i === 0 && firstClipSeekSec > 0) inputArgs.push('-ss', String(firstClipSeekSec))
     inputArgs.push('-i', clip.video.path)
   })
@@ -185,7 +198,7 @@ export function buildFfmpegArgs(
     // ffmpeg's own `?` skip audio gracefully if the clip happens to have none. Only reachable when
     // no delivery preset needs to actually resize the output -- otherwise falls through to case B's
     // graph shape (which already has a real video filter chain to attach `scale=` to).
-    filterComplex = `[${overlayInputIndex}:v]format=rgba[ov];[0:v][ov]overlay=0:0:format=auto[v]`
+    filterComplex = `[${overlayInputIndex}:v]format=rgba[ov];${overlayFilter('0:v', 'v', overlayRoi)}`
     videoMapLabel = '[v]'
     audioMapLabel = '0:a?'
     audioCodecArgs = resolveStreamCopyableAudioArgs(settings)
@@ -198,7 +211,7 @@ export function buildFfmpegArgs(
     const endSec = Math.max(0, clipLocalSeconds(clips[0], trimEndMs) - firstClipSeekSec)
     const parts = [`[0:v]trim=end=${endSec},setpts=PTS-STARTPTS${scaleSuffixIfNeeded(clips[0], settings)}[vtrim]`]
     if (hasAudio) parts.push(`[0:a]atrim=end=${endSec},asetpts=PTS-STARTPTS[atrim]`)
-    parts.push(`[${overlayInputIndex}:v]format=rgba[ov]`, '[vtrim][ov]overlay=0:0:format=auto[v]')
+    parts.push(`[${overlayInputIndex}:v]format=rgba[ov]`, overlayFilter('vtrim', 'v', overlayRoi))
     filterComplex = parts.join(';')
     videoMapLabel = '[v]'
     audioMapLabel = hasAudio ? '[atrim]' : null
@@ -242,7 +255,7 @@ export function buildFfmpegArgs(
 
     const concatOutputs = hasAudio ? '[vconcat][aconcat]' : '[vconcat]'
     segmentParts.push(`${concatPins.join('')}concat=n=${clips.length}:v=1:a=${hasAudio ? 1 : 0}${concatOutputs}`)
-    segmentParts.push(`[${overlayInputIndex}:v]format=rgba[ov]`, '[vconcat][ov]overlay=0:0:format=auto[vout]')
+    segmentParts.push(`[${overlayInputIndex}:v]format=rgba[ov]`, overlayFilter('vconcat', 'vout', overlayRoi))
 
     filterComplex = segmentParts.join(';')
     videoMapLabel = '[vout]'
@@ -258,7 +271,7 @@ export function buildFfmpegArgs(
     '-pix_fmt',
     'rgba',
     '-s',
-    `${settings.width}x${settings.height}`,
+    `${overlayRoi.width}x${overlayRoi.height}`,
     '-r',
     String(settings.fps),
     '-i',
@@ -278,8 +291,86 @@ export function buildFfmpegArgs(
   return args
 }
 
-/** Runs one full ffmpeg pass with a specific encoder. Rejects (without partial output left behind by ffmpeg's own -y overwrite semantics) if that encoder fails partway through. */
-function runWithEncoder(
+/** Runs one full ffmpeg pass with a specific encoder. The caller owns the private attempt output and
+ * removes it when this pass fails or is cancelled. */
+type DrainWaitResult =
+  | { kind: 'drain' }
+  | { kind: 'aborted' }
+  | { kind: 'closed' }
+  | { kind: 'error'; error: unknown }
+
+type FfmpegChild = ChildProcessByStdio<Writable, null, Readable>
+
+function waitForDrain(stream: Writable, signal?: AbortSignal): Promise<DrainWaitResult> {
+  return new Promise((resolve) => {
+    if (stream.destroyed) {
+      resolve({ kind: 'closed' })
+      return
+    }
+
+    let settled = false
+
+    const cleanup = (): void => {
+      stream.removeListener('drain', onDrain)
+      stream.removeListener('error', onError)
+      stream.removeListener('close', onClose)
+      signal?.removeEventListener('abort', onAbort)
+    }
+
+    const settle = (result: DrainWaitResult): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(result)
+    }
+
+    const onDrain = (): void => settle({ kind: 'drain' })
+    const onError = (error: Error): void => settle({ kind: 'error', error })
+    const onClose = (): void => settle({ kind: 'closed' })
+    const onAbort = (): void => settle({ kind: 'aborted' })
+
+    stream.once('drain', onDrain)
+    stream.once('error', onError)
+    stream.once('close', onClose)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    // AbortSignal does not replay an abort event to a listener registered after abort(). Check
+    // again after registration so this helper cannot wait forever on an already-aborted signal.
+    if (signal?.aborted) onAbort()
+  })
+}
+
+async function waitForFfmpegExitOrAbort(ff: FfmpegChild, exitPromise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await exitPromise
+    return
+  }
+
+  if (signal.aborted) {
+    if (!ff.killed) ff.kill()
+    await exitPromise.catch(() => undefined)
+    throw new ExportCancelledError()
+  }
+
+  let onAbort: (() => void) | null = null
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new ExportCancelledError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+
+  try {
+    await Promise.race([exitPromise, abortPromise])
+  } catch (error) {
+    if (!(error instanceof ExportCancelledError)) throw error
+    if (!ff.killed) ff.kill()
+    await exitPromise.catch(() => undefined)
+    throw error
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+async function runWithEncoder(
   resolvedFfmpegPath: string,
   encoder: VideoEncoder,
   clips: ClipInfo[],
@@ -288,81 +379,240 @@ function runWithEncoder(
   trimStartMs: number,
   trimEndMs: number,
   totalFrames: number,
-  renderFrame: (sampleCts: number, elapsedMs: number) => Buffer,
+  frameSource: ExportFrameSource,
+  overlayRoi: OverlayRoi,
+  profileMetadata: {
+    jobId: string
+    attemptId: number
+    rendererSetupMs: number
+    encoderSelectionMs: number
+    widgetCount: number
+    decodeProbeStatus: 'not-run' | 'passed' | 'failed'
+    decodeProbeMs: number
+    decodeProbeFailure: string | null
+  },
   onProgress?: (framesWritten: number, totalFrames: number) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const args = buildFfmpegArgs(clips, settings, trimStartMs, trimEndMs, totalFrames, encoder, outputPath)
+  const args = buildFfmpegArgs(clips, settings, trimStartMs, trimEndMs, totalFrames, encoder, outputPath, overlayRoi)
+  const profiler = new ExportAttemptProfiler({
+    jobId: profileMetadata.jobId,
+    attemptId: profileMetadata.attemptId,
+    encoderLabel: encoder.label,
+    encoderCodec: encoder.codec,
+    decodeHwaccel: encoder.decodeHwaccel ?? null,
+    decodeProbeStatus: profileMetadata.decodeProbeStatus,
+    decodeProbeMs: profileMetadata.decodeProbeMs,
+    decodeProbeFailure: profileMetadata.decodeProbeFailure,
+    width: settings.width,
+    height: settings.height,
+    overlayX: overlayRoi.x,
+    overlayY: overlayRoi.y,
+    overlayWidth: overlayRoi.width,
+    overlayHeight: overlayRoi.height,
+    fps: settings.fps,
+    totalFrames,
+    clipCount: clips.length,
+    widgetCount: profileMetadata.widgetCount,
+    renderWorkers: frameSource.workerCount,
+    preferGpu: settings.preferGpu ?? true,
+    rendererSetupMs: profileMetadata.rendererSetupMs,
+    encoderSelectionMs: profileMetadata.encoderSelectionMs
+  })
 
-  return new Promise((resolveOuter, rejectOuter) => {
-    void (async () => {
-      const ff = spawn(resolvedFfmpegPath, args, { stdio: ['pipe', 'ignore', 'pipe'] })
+  let ff: FfmpegChild | null = null
+  let exitPromise: Promise<void> | null = null
+  let processWaiter: ReturnType<typeof createExportProcessWaiter> | null = null
+  let stdinError: unknown = null
+  let stderrTail = ''
+  let cancelled = false
+  let onStdinError: ((err: Error) => void) | null = null
 
-      let stderrTail = ''
-      ff.stderr.on('data', (chunk: Buffer) => {
-        stderrTail = (stderrTail + chunk.toString()).slice(-4000)
+  try {
+    profiler.markFfmpegSpawnStart()
+    ff = spawn(resolvedFfmpegPath, args, { stdio: ['pipe', 'ignore', 'pipe'] })
+    profiler.markFfmpegSpawned()
+
+    ff.stderr.on('data', (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString()).slice(-4000)
+      profiler.observeFfmpegStderr(chunk.toString())
+    })
+
+    onStdinError = (err: Error): void => {
+      stdinError = err
+    }
+    ff.stdin.on('error', onStdinError)
+
+    exitPromise = new Promise<void>((resolve, reject) => {
+      ff?.once('error', (error) => reject(new FfmpegProcessError(encoder.label, null, stderrTail, error)))
+      ff?.once('close', (code) => {
+        profiler.markFfmpegClosed(code)
+        if (code === 0) resolve()
+        else reject(new FfmpegProcessError(encoder.label, code, stderrTail))
       })
+    })
+    processWaiter = createExportProcessWaiter(exitPromise, signal, () => new ExportCancelledError())
 
-      let writeError: unknown = null
-      ff.stdin.on('error', (err) => {
-        writeError = err
-      })
+    // At most one outstanding frame per worker. The next frame for a worker is requested only
+    // after its previous result is consumed, so large RGBA buffers cannot accumulate unboundedly.
+    const queued = new Map<number, Promise<RenderedFrame>>()
+    const enqueue = (index: number): void => {
+      const elapsedMs = (index / settings.fps) * 1000
+      const frame = frameSource.renderFrame(index, trimStartMs + elapsedMs, elapsedMs)
+      void frame.catch(() => undefined) // A later prefetched frame may fail before it is awaited.
+      queued.set(index, frame)
+    }
+    for (let index = 0; index < Math.min(totalFrames, frameSource.prefetchCount); index++) enqueue(index)
 
-      const exitPromise = new Promise<void>((resolve, reject) => {
-        ff.on('error', reject)
-        ff.on('close', (code) => {
-          if (code === 0) resolve()
-          else reject(new Error(`ffmpeg (${encoder.label}) exited with code ${code}\n${stderrTail}`))
-        })
-      })
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (stdinError) throw stdinError
+      if (signal?.aborted) {
+        cancelled = true
+        break
+      }
 
-      let cancelled = false
-      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
-        if (writeError) break
-        if (signal?.aborted) {
+      const waitStartedAtMs = performance.now()
+      const rendered = await processWaiter.waitFor(queued.get(frameIndex)!)
+      profiler.recordRenderWait(performance.now() - waitStartedAtMs)
+      queued.delete(frameIndex)
+      const nextIndex = frameIndex + frameSource.prefetchCount
+      // Keep both workers busy while ffmpeg consumes the current frame. With only one renderer,
+      // pre-rendering into the pipe wait did not improve throughput and retains another full RGBA
+      // snapshot, so preserve the strictly serial, lower-memory path instead.
+      if (frameSource.workerCount > 1 && nextIndex < totalFrames) enqueue(nextIndex)
+      const frameBuffer = rendered.pixels
+      profiler.recordRendered(rendered.renderMs, frameBuffer.byteLength)
+
+      const writeStartedAtMs = performance.now()
+      let canWriteMore: boolean
+      try {
+        canWriteMore = ff.stdin.write(frameBuffer)
+      } finally {
+        profiler.recordWriteCall(performance.now() - writeStartedAtMs)
+      }
+      profiler.recordSubmitted()
+
+      if (!canWriteMore) {
+        const drainStartedAtMs = performance.now()
+        const drainController = new AbortController()
+        let drainResult: DrainWaitResult
+        try {
+          drainResult = await processWaiter.waitFor(waitForDrain(ff.stdin, drainController.signal))
+        } finally {
+          // If child exit/cancellation won, remove the losing drain wait's stream listeners too.
+          drainController.abort()
+        }
+        profiler.recordDrainWait(performance.now() - drainStartedAtMs)
+        if (drainResult.kind === 'aborted') {
           cancelled = true
           break
         }
-
-        const elapsedMs = (frameIndex / settings.fps) * 1000
-        const sampleCts = trimStartMs + elapsedMs
-        const frameBuffer = renderFrame(sampleCts, elapsedMs)
-
-        try {
-          const canWriteMore = ff.stdin.write(frameBuffer)
-          if (!canWriteMore) {
-            await new Promise<void>((resolve) => ff.stdin.once('drain', resolve))
-          }
-        } catch (err) {
-          writeError = err
-          break
-        }
-
-        onProgress?.(frameIndex + 1, totalFrames)
+        if (drainResult.kind === 'error') throw drainResult.error
+        if (drainResult.kind === 'closed') throw new Error('ffmpeg input closed before export completed')
       }
 
-      if (cancelled) {
-        // Kill outright rather than a graceful stdin.end() -- there's no output worth finishing,
-        // and closing stdin normally would just make ffmpeg run to completion on the frames already
-        // buffered/written so far instead of stopping promptly.
-        ff.kill()
-      } else {
-        try {
-          ff.stdin.end()
-        } catch {
-          // stream may already be closed if ffmpeg exited early; the real error surfaces via exitPromise
-        }
-      }
+      onProgress?.(frameIndex + 1, totalFrames)
+      if (frameSource.workerCount === 1 && nextIndex < totalFrames && !signal?.aborted) enqueue(nextIndex)
+    }
 
+    if (stdinError) throw stdinError
+    if (signal?.aborted) cancelled = true
+    profiler.markSubmissionComplete()
+
+    if (cancelled) {
+      // There is no usable partial output. Kill and await the child so cancellation cannot leave a
+      // detached ffmpeg process or a drain listener waiting forever.
+      ff.kill()
+      if (exitPromise) await exitPromise.catch(() => undefined)
+      throw new ExportCancelledError()
+    }
+
+    ff.stdin.end()
+    await waitForFfmpegExitOrAbort(ff, exitPromise, signal)
+    profiler.finish('success', null)
+  } catch (err) {
+    if (signal?.aborted || err instanceof ExportCancelledError) cancelled = true
+    // A failed render/write can happen before ffmpeg reports its own exit. Preserve the original
+    // application error, but use ffmpeg's typed process error when the pipe was closed because the
+    // child failed. This lets the caller distinguish a hardware failure from a render/output error.
+    let childExitError: unknown = null
+    profiler.markSubmissionComplete()
+
+    if (ff && !ff.killed) {
+      // Closing stdin alone is not sufficient after a render/write failure: ffmpeg may continue
+      // encoding the frames already buffered in the pipe. Kill it and await close before handing
+      // the error to the caller so the next encoder attempt cannot overlap this one.
+      ff.stdin.destroy()
+      ff.kill()
+    }
+    if (exitPromise) {
       try {
         await exitPromise
-        if (cancelled) rejectOuter(new ExportCancelledError())
-        else resolveOuter()
-      } catch (err) {
-        rejectOuter(cancelled ? new ExportCancelledError() : err)
+      } catch (exitError) {
+        childExitError = exitError
       }
-    })()
-  })
+    }
+
+    const pipeFailure =
+      err === stdinError ||
+      (err instanceof Error &&
+        (err.message === 'ffmpeg input closed before export completed' ||
+          ('code' in err && (err as NodeJS.ErrnoException).code === 'EPIPE') ||
+          ('code' in err && (err as NodeJS.ErrnoException).code === 'ERR_STREAM_DESTROYED')))
+    const errorToThrow = pipeFailure && childExitError instanceof FfmpegProcessError ? childExitError : err
+
+    if (cancelled) {
+      profiler.finish('cancelled', null, err instanceof ExportCancelledError ? undefined : err)
+      throw new ExportCancelledError()
+    }
+
+    profiler.finish('failed', null, errorToThrow)
+    throw errorToThrow
+  } finally {
+    processWaiter?.dispose()
+    // The child has been awaited on every path above. Removing this listener prevents a later
+    // stream error from retaining the export closure after a failed or cancelled attempt.
+    if (ff && onStdinError) ff.stdin.removeListener('error', onStdinError)
+  }
+}
+
+class FfmpegProcessError extends Error {
+  readonly name = 'FfmpegProcessError'
+
+  constructor(
+    readonly encoderLabel: string,
+    readonly exitCode: number | null,
+    readonly stderrTail: string,
+    cause?: unknown
+  ) {
+    const details = stderrTail ? `\n${stderrTail}` : ''
+    super(`ffmpeg (${encoderLabel}) exited with code ${exitCode ?? 'unknown'}${details}`, { cause })
+  }
+}
+
+const HARDWARE_FAILURE_HINTS = [
+  // Backend names also occur in healthy banners/stream mapping. Require an actual failure on
+  // that diagnostic line; otherwise a disk/input error would always retry an NVENC export.
+  /(?:nvenc|nvidia|cuda|cuvid|qsv|quick\s*sync|vaapi|amf|videotoolbox|d3d11)[^\r\n]*(?:fail|error|cannot|could not|not available|not found|not supported|does not support|unsupported|lost)/i,
+  /(?:fail|error|cannot|could not|not available|not found|not supported|does not support|unsupported|lost)[^\r\n]*(?:nvenc|nvidia|cuda|cuvid|qsv|quick\s*sync|vaapi|amf|videotoolbox|d3d11)/i,
+  /hardware\s+(?:device|accelerat)/i,
+  /no\s+.+(?:capable|supported)\s+devices?/i,
+  /error while opening encoder/i,
+  /(?:failed|could not)\s+(?:to\s+)?(?:initialize|initialise|open)\s+(?:the\s+)?(?:encoder|device|hardware)/i,
+  /device setup failed/i
+]
+
+function isRecoverableHardwareFailure(error: unknown, encoder: VideoEncoder): boolean {
+  if (encoder.codec === CPU_ENCODER.codec || !(error instanceof FfmpegProcessError)) return false
+  // error.message includes our own encoder label, which is not evidence of a hardware fault.
+  const text = error.stderrTail
+  return HARDWARE_FAILURE_HINTS.some((pattern) => pattern.test(text))
+}
+
+function useParallelRendering(settings: ExportSettings, telemetry?: TelemetryData): boolean {
+  // Raw telemetry is needed to construct independent samplers inside the workers. Normal UI
+  // exports always provide it; sampler-only callers retain the serial compatibility path.
+  return telemetry !== undefined && settings.renderWorkers !== 1
 }
 
 export async function runExport(options: RunExportOptions): Promise<void> {
@@ -371,6 +621,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     outputPath,
     widgets,
     sampler,
+    telemetry,
     startFinish,
     startFinishRadiusM,
     crossingAdjustmentsMs,
@@ -388,39 +639,141 @@ export async function runExport(options: RunExportOptions): Promise<void> {
   if (!ffmpegPath) throw new Error('Bundled ffmpeg binary not found for this platform')
   if (widgets.length === 0) throw new Error('No widgets to export')
   if (clips.length === 0) throw new Error('No clips to export')
+  const sourcePaths = clips.map((clip) => clip.video.path)
+  // Protect every imported source, including chapters excluded by the current trim range.
+  await assertSafeExportOutput(outputPath, sourcePaths)
   const resolvedFfmpegPath: string = ffmpegPath
+  const jobId = createExportJobId()
 
   const totalFrames = Math.max(1, Math.round(((trimEndMs - trimStartMs) / 1000) * settings.fps))
-  const renderFrame = await createFrameRenderer(
-    settings.width,
-    settings.height,
-    widgets,
-    sampler,
-    startFinish,
-    startFinishRadiusM,
-    crossingAdjustmentsMs,
-    ignoredCrossings,
-    trimEndMs,
-    trimStartMs,
-    defaultFontFamily
-  )
-
-  const encoder = await selectVideoEncoder(resolvedFfmpegPath, settings.preferGpu ?? true)
+  const encoderSelectionStartedAtMs = performance.now()
+  let encoder = await selectVideoEncoder(resolvedFfmpegPath, settings.preferGpu ?? true)
+  let decodeProbeStatus: 'not-run' | 'passed' | 'failed' = 'not-run'
+  let decodeProbeFailure: string | null = null
+  const decodeProbeStartedAtMs = performance.now()
+  if (signal?.aborted) throw new ExportCancelledError()
+  if (encoder.decodeHwaccel === 'cuda') {
+    decodeProbeStatus = 'passed'
+    for (const clip of clipsOverlappingTrim(clips, trimStartMs, trimEndMs)) {
+      const probe = await probeCudaInput(resolvedFfmpegPath, clip.video.path, clipLocalSeconds(clip, trimStartMs), signal)
+      if (signal?.aborted || probe.reason === 'cancelled') throw new ExportCancelledError()
+      if (!probe.ok) {
+        decodeProbeStatus = 'failed'
+        decodeProbeFailure = probe.reason
+        // Preserve working GPU encoding when only input hardware decoding is unavailable.
+        encoder = { ...encoder, decodeHwaccel: undefined }
+        console.warn(`[export] CUDA input probe failed (${probe.reason}); using software decode with ${encoder.label}`)
+        break
+      }
+    }
+  }
+  const decodeProbeMs = decodeProbeStatus === 'not-run' ? 0 : performance.now() - decodeProbeStartedAtMs
+  const encoderSelectionMs = performance.now() - encoderSelectionStartedAtMs
   console.log(`[export] using video encoder: ${encoder.label} (${encoder.codec})`)
   onEncoderSelected?.(encoder.label)
 
+  const createFrameSource = async (): Promise<ExportFrameSource> => {
+    if (useParallelRendering(settings, telemetry)) {
+      try {
+        return await createParallelFrameRenderer({
+          width: settings.width,
+          height: settings.height,
+          widgets,
+          telemetry: telemetry!,
+          startFinish,
+          startFinishRadiusM,
+          crossingAdjustmentsMs,
+          ignoredCrossings,
+          trimStartMs,
+          trimEndMs,
+          defaultFontFamily,
+          assetDirectories: { fonts: getExportFontsDirectory(), icons: getExportIconsDirectory() }
+        }, signal)
+      } catch (error) {
+        if (signal?.aborted) throw new ExportCancelledError()
+        console.warn('[export] parallel renderer unavailable; using one renderer:', error)
+      }
+    }
+
+    const renderer = await createFrameRenderer(
+      settings.width,
+      settings.height,
+      widgets,
+      sampler,
+      startFinish,
+      startFinishRadiusM,
+      crossingAdjustmentsMs,
+      ignoredCrossings,
+      trimEndMs,
+      trimStartMs,
+      defaultFontFamily
+    )
+    return {
+      roi: renderer.roi,
+      workerCount: 1,
+      prefetchCount: 1,
+      renderFrame(_index, sampleCts, elapsedMs) {
+        return Promise.resolve().then(() => {
+          const startedAtMs = performance.now()
+          const pixels = renderer.renderFrame(sampleCts, elapsedMs)
+          return { pixels, renderMs: performance.now() - startedAtMs }
+        })
+      },
+      async close() {}
+    }
+  }
+
+  const runAttempt = async (attemptEncoder: VideoEncoder, attemptId: number): Promise<void> => {
+    const tempOutputPath = attemptOutputPath(outputPath, jobId, attemptId)
+    let frameSource: ExportFrameSource | null = null
+    try {
+      const rendererSetupStartedAtMs = performance.now()
+      frameSource = await createFrameSource()
+      const rendererSetupMs = performance.now() - rendererSetupStartedAtMs
+      console.log(`[export] frame renderer: ${frameSource.workerCount} worker(s)`)
+      await runWithEncoder(
+        resolvedFfmpegPath,
+        attemptEncoder,
+        clips,
+        tempOutputPath,
+        settings,
+        trimStartMs,
+        trimEndMs,
+        totalFrames,
+        frameSource,
+        frameSource.roi,
+        {
+          jobId, attemptId, rendererSetupMs, encoderSelectionMs, widgetCount: widgets.length,
+          decodeProbeStatus, decodeProbeMs, decodeProbeFailure
+        },
+        onProgress,
+        signal
+      )
+      await commitAttemptOutput(tempOutputPath, outputPath, `${jobId}-${attemptId}`, sourcePaths, signal)
+    } catch (error) {
+      await removeAttemptFile(tempOutputPath)
+      throw error
+    } finally {
+      await frameSource?.close()
+    }
+  }
+
   try {
-    await runWithEncoder(resolvedFfmpegPath, encoder, clips, outputPath, settings, trimStartMs, trimEndMs, totalFrames, renderFrame, onProgress, signal)
+    await runAttempt(encoder, 1)
   } catch (err) {
+    // A failed rollback needs user-visible recovery information, even when Cancel caused it.
+    if (err instanceof ExportOutputRecoveryError) throw err
     // A deliberate cancellation is never retried with a fallback encoder -- there's nothing to
     // recover from, the user asked to stop.
     if (err instanceof ExportCancelledError) throw err
-    // The quick smoke-test in selectVideoEncoder can pass while the real export (much larger
-    // resolution/duration) still hits a GPU-specific limit -- fall back to CPU once rather than
-    // failing the whole export outright.
-    if (encoder.codec === CPU_ENCODER.codec) throw err
-    console.warn(`[export] ${encoder.label} failed mid-export, retrying with CPU encoder:`, err)
+    if (signal?.aborted) throw new ExportCancelledError()
+    // Only a typed ffmpeg failure containing a hardware-backend diagnostic is retryable. Render,
+    // input, disk, and output-path errors must surface immediately instead of causing a full second
+    // export that cannot fix the underlying problem.
+    if (!isRecoverableHardwareFailure(err, encoder)) throw err
+    if (signal?.aborted) throw new ExportCancelledError()
+    console.warn(`[export] ${encoder.label} hardware path failed, retrying with CPU encoder:`, err)
     onEncoderSelected?.(`${CPU_ENCODER.label} (fallback after ${encoder.label} failed)`)
-    await runWithEncoder(resolvedFfmpegPath, CPU_ENCODER, clips, outputPath, settings, trimStartMs, trimEndMs, totalFrames, renderFrame, onProgress, signal)
+    await runAttempt(CPU_ENCODER, 2)
   }
 }

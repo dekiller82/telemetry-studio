@@ -64,7 +64,9 @@
       "buildResources": "build"
     },
     "files": [
-      "out/**/*",
+      "out/main/**/*",
+      "out/preload/**/*",
+      "out/renderer/**/*",
       "package.json",
       "CHANGELOG.md",
       "!**/*.map"

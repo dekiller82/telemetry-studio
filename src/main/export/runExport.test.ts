@@ -8,6 +8,7 @@ import type { VideoEncoder } from './gpuEncoder'
 // hoists vi.mock calls above the imports below, so this runs before they resolve. Never actually
 // called by the buildFfmpegArgs/clipsOverlappingTrim logic under test here.
 vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => process.cwd() } }))
+vi.mock('./frameWorker?modulePath', () => ({ default: 'mock-frame-worker.js' }))
 
 const { buildFfmpegArgs, clipsOverlappingTrim } = await import('./runExport')
 
@@ -140,5 +141,40 @@ describe('buildFfmpegArgs multi-clip trim', () => {
     const filterComplexIndex = args.indexOf('-filter_complex')
     expect(args[filterComplexIndex + 1]).not.toContain('trim=')
     expect(args).not.toContain('-ss')
+  })
+
+  it.each([
+    { name: 'single untrimmed clip', start: 0, end: 300000, clips: [fourClips()[0]] },
+    { name: 'trim within a middle clip', start: 444602, end: 506518, clips: fourClips() },
+    { name: 'trim across multiple clips', start: 250000, end: 650000, clips: fourClips() }
+  ])('preserves ROI positioning and premultiplied alpha for $name', ({ start, end, clips }) => {
+    const roi = { x: 80, y: 40, width: 320, height: 180 }
+    const args = buildFfmpegArgs(clips, settings, start, end, 100, CPU_ENCODER, 'out.mp4', roi)
+    expect(args[args.indexOf('-s') + 1]).toBe('320x180')
+    const graph = args[args.indexOf('-filter_complex') + 1]
+    expect(graph).toContain('overlay=80:40:format=auto:alpha=premultiplied')
+    expect(graph).not.toContain('overlay=0:0')
+  })
+
+  it('reports a useful error when the export range overlaps no input clip', () => {
+    expect(() => buildFfmpegArgs(fourClips(), settings, 1300000, 1400000, 100, CPU_ENCODER, 'out.mp4'))
+      .toThrow('No video clips overlap the export range')
+  })
+
+  it('limits CUDA decoder threads before every active video input, without limiting filters or encoding', () => {
+    const encoder: VideoEncoder = { ...CPU_ENCODER, codec: 'h264_nvenc', decodeHwaccel: 'cuda' }
+    const args = buildFfmpegArgs(fourClips(), settings, 250000, 650000, 100, encoder, 'out.mp4')
+    for (const clip of fourClips().slice(0, 3)) {
+      const index = args.indexOf(clip.video.path)
+      const previousInput = args.lastIndexOf('-i', index - 2)
+      const inputOptions = args.slice(previousInput + 2, index)
+      expect(inputOptions).toContain('cuda')
+      expect(inputOptions.slice(inputOptions.indexOf('-threads'), inputOptions.indexOf('-threads') + 2)).toEqual(['-threads', '4'])
+    }
+    const pipeIndex = args.indexOf('pipe:0')
+    expect(args.slice(pipeIndex)).not.toContain('-threads')
+    const cpuArgs = buildFfmpegArgs(fourClips(), settings, 250000, 650000, 100, CPU_ENCODER, 'out.mp4')
+    expect(cpuArgs).not.toContain('-threads')
+    expect(cpuArgs).not.toContain('-hwaccel')
   })
 })

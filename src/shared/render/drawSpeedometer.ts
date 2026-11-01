@@ -1,7 +1,7 @@
 import { convertSpeed, speedUnitLabel, type SpeedUnit } from '../units'
 import { DEFAULT_SPEED_SMOOTHING_MS } from '../telemetry/sampleAt'
 import { resolveFontStack } from './fonts'
-import { drawOutlinedText, fillRoundedRect, scaleToRect, type Canvas2DLike, type Rect } from './canvas2d'
+import { drawOutlinedText, drawStaticWidgetLayer, fillRoundedRect, scaleToRect, type Canvas2DLike, type StaticWidgetLayer, type Rect } from './canvas2d'
 
 export interface SpeedometerStyle {
   unit: SpeedUnit
@@ -44,15 +44,11 @@ export interface DrawSpeedometerOptions {
   speedMps: number
   style: SpeedometerStyle
   fontFamily?: string
+  /** Pre-rendered static dial/panel layer supplied by the headless export renderer. */
+  staticLayer?: StaticWidgetLayer | null
 }
 
-export function drawSpeedometerDigital(ctx: Canvas2DLike, options: DrawSpeedometerOptions): void {
-  const { rect, speedMps, style, fontFamily } = options
-  const fontStack = resolveFontStack(fontFamily, 'bold')
-  const value = convertSpeed(speedMps, style.unit)
-  const cx = rect.x + rect.w / 2
-  const outlineWidth = scaleToRect(style.textOutlineWidth, rect)
-
+function drawSpeedometerDigitalBackground(ctx: Canvas2DLike, rect: Rect, style: SpeedometerStyle): void {
   if (style.backgroundOpacity > 0) {
     ctx.save()
     ctx.globalAlpha = style.backgroundOpacity
@@ -60,6 +56,18 @@ export function drawSpeedometerDigital(ctx: Canvas2DLike, options: DrawSpeedomet
     fillRoundedRect(ctx, rect.x, rect.y, rect.w, rect.h, scaleToRect(style.cornerRadius, rect))
     ctx.restore()
   }
+}
+
+/** Draws only the speedometer digital panel background into a local cache canvas. */
+export function drawSpeedometerDigitalStaticLayer(ctx: Canvas2DLike, rect: Rect, style: SpeedometerStyle): void {
+  drawSpeedometerDigitalBackground(ctx, rect, style)
+}
+
+function drawSpeedometerDigitalValue(ctx: Canvas2DLike, rect: Rect, speedMps: number, style: SpeedometerStyle, fontFamily?: string): void {
+  const fontStack = resolveFontStack(fontFamily, 'bold')
+  const value = convertSpeed(speedMps, style.unit)
+  const cx = rect.x + rect.w / 2
+  const outlineWidth = scaleToRect(style.textOutlineWidth, rect)
 
   // Center the value+unit block as a whole in the panel instead of anchoring the value near the
   // top and the unit at a fixed offset from it -- the old fixed offsets pushed the unit label right
@@ -90,6 +98,13 @@ export function drawSpeedometerDigital(ctx: Canvas2DLike, options: DrawSpeedomet
   ctx.restore()
 }
 
+export function drawSpeedometerDigital(ctx: Canvas2DLike, options: DrawSpeedometerOptions): void {
+  const { rect, speedMps, style, fontFamily, staticLayer } = options
+  if (staticLayer) drawStaticWidgetLayer(ctx, rect, staticLayer)
+  else drawSpeedometerDigitalBackground(ctx, rect, style)
+  drawSpeedometerDigitalValue(ctx, rect, speedMps, style, fontFamily)
+}
+
 const GAUGE_START_ANGLE = Math.PI * 0.75
 const GAUGE_END_ANGLE = Math.PI * 2.25
 const GAUGE_SWEEP = GAUGE_END_ANGLE - GAUGE_START_ANGLE
@@ -109,8 +124,44 @@ function niceTickStep(span: number, targetCount: number): number {
   return niceResidual * magnitude
 }
 
+function drawSpeedometerAnalogLabels(ctx: Canvas2DLike, rect: Rect, style: SpeedometerStyle, fontFamily?: string): void {
+  const fontStack = resolveFontStack(fontFamily, 'bold')
+  const span = style.max - style.min || 1
+  const cx = rect.x + rect.w / 2
+  const cy = rect.y + rect.h / 2
+  const radius = (Math.min(rect.w, rect.h) / 2) * 0.74
+  const outlineWidth = scaleToRect(style.textOutlineWidth, rect)
+  const majorStep = niceTickStep(span, TARGET_MAJOR_TICKS)
+  const tickCount = Math.round(span / (majorStep / MINOR_SUBDIVISIONS))
+
+  ctx.save()
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `600 ${Math.round(radius * 0.16)}px ${fontStack}`
+  for (let i = 0; i * MINOR_SUBDIVISIONS <= tickCount; i++) {
+    const tickValue = style.min + i * majorStep
+    const angle = GAUGE_START_ANGLE + ((tickValue - style.min) / span) * GAUGE_SWEEP
+    const labelRadius = radius * 1.2
+    drawOutlinedText(
+      ctx,
+      Math.round(tickValue).toString(),
+      cx + Math.cos(angle) * labelRadius,
+      cy + Math.sin(angle) * labelRadius,
+      style.color,
+      outlineWidth,
+      style.textOutlineColor
+    )
+  }
+  ctx.restore()
+}
+
+/** Draws the analog dial's value-independent labels into a local cache canvas. */
+export function drawSpeedometerAnalogStaticLayer(ctx: Canvas2DLike, rect: Rect, style: SpeedometerStyle, fontFamily?: string): void {
+  drawSpeedometerAnalogLabels(ctx, rect, style, fontFamily)
+}
+
 export function drawSpeedometerAnalog(ctx: Canvas2DLike, options: DrawSpeedometerOptions): void {
-  const { rect, speedMps, style, fontFamily } = options
+  const { rect, speedMps, style, fontFamily, staticLayer } = options
   const fontStack = resolveFontStack(fontFamily, 'bold')
   const value = convertSpeed(speedMps, style.unit)
   const span = style.max - style.min || 1
@@ -164,26 +215,10 @@ export function drawSpeedometerAnalog(ctx: Canvas2DLike, options: DrawSpeedomete
   ctx.stroke()
   ctx.restore()
 
-  // Numeric label at every major tick, just outside the ring.
-  ctx.save()
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.font = `600 ${Math.round(radius * 0.16)}px ${fontStack}`
-  for (let i = 0; i * MINOR_SUBDIVISIONS <= tickCount; i++) {
-    const tickValue = style.min + i * majorStep
-    const angle = GAUGE_START_ANGLE + ((tickValue - style.min) / span) * GAUGE_SWEEP
-    const labelRadius = radius * 1.2
-    drawOutlinedText(
-      ctx,
-      Math.round(tickValue).toString(),
-      cx + Math.cos(angle) * labelRadius,
-      cy + Math.sin(angle) * labelRadius,
-      style.color,
-      outlineWidth,
-      style.textOutlineColor
-    )
-  }
-  ctx.restore()
+  // Numeric labels are value-independent and can be composited from a cache. They are drawn here
+  // after the dynamic ticks/needle to preserve the original z-order.
+  if (staticLayer) drawStaticWidgetLayer(ctx, rect, staticLayer)
+  else drawSpeedometerAnalogLabels(ctx, rect, style, fontFamily)
 
   ctx.save()
   ctx.textAlign = 'center'

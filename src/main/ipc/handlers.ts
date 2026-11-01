@@ -1,5 +1,4 @@
 import { ipcMain, dialog, BrowserWindow, app, type OpenDialogOptions } from 'electron'
-import { unlink } from 'fs/promises'
 import { ensurePreviewProxy } from '../video/previewProxy'
 import { probeAndParseClip, buildImportResult, sliceClipTelemetry, type ProbedClip } from '../video/clipImport'
 import { orderAndValidateGoProClipPaths } from '../video/goproClipOrder'
@@ -175,6 +174,7 @@ export function registerIpcHandlers(): void {
         outputPath: result.filePath,
         widgets: payload.widgets,
         sampler,
+        telemetry: payload.imported.telemetry,
         startFinish: payload.startFinish,
         startFinishRadiusM: payload.startFinishRadiusM,
         crossingAdjustmentsMs: payload.crossingAdjustmentsMs,
@@ -200,14 +200,8 @@ export function registerIpcHandlers(): void {
       })
     } catch (err) {
       if (err instanceof ExportCancelledError) {
-        // ffmpeg was killed mid-write, so whatever it wrote to outputPath is a truncated/corrupt
-        // file, not a usable partial export -- best-effort cleanup, same as ffmpeg's own -y
-        // overwrite semantics never leaving a broken file behind on a genuine failure.
-        try {
-          await unlink(result.filePath)
-        } catch {
-          // nothing to clean up, or already gone -- either way, not worth failing on
-        }
+        // runExport owns its temporary file and only publishes after success. Leave any
+        // pre-existing destination intact when the user cancels.
         event.sender.send('export:cancelled')
         return null
       }

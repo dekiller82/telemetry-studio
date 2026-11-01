@@ -23,9 +23,9 @@ export interface VideoEncoder {
    *  with it in a single ffmpeg invocation. */
   bitrateArgs: (kbps: number) => string[]
   label: string
-  /** ffmpeg -hwaccel value to pair with this encoder for GPU-accelerated decode too, if this
-   *  machine was smoke-tested to actually support it. Undefined means decode stays on CPU while
-   *  only the encode step runs on the GPU -- still a real speedup, just a smaller one. */
+  /** Candidate ffmpeg -hwaccel pairing. GPU encoding does not prove decoding support: runExport
+   *  probes actual CUDA inputs; QSV/VideoToolbox use the selector's roundtrip probe below.
+   *  Undefined means software decode, independently of the chosen encoder. */
   decodeHwaccel?: string
 }
 
@@ -49,8 +49,8 @@ const GPU_ENCODER_CANDIDATES: VideoEncoder[] = [
       '-bufsize',
       `${Math.round(kbps * BITRATE_BUFSIZE_MULTIPLIER)}k`
     ],
-    // NVDEC pairs reliably with NVENC across driver versions and was verified via real CLI runs
-    // during this app's initial export work -- trusted unconditionally, unlike QSV below.
+    // Candidate decode path only. runExport probes the actual active source clips before use;
+    // a working NVENC encoder does not prove that their codec/profile can be decoded by NVDEC.
     decodeHwaccel: 'cuda'
   },
   {
@@ -120,7 +120,7 @@ const GPU_ENCODER_CANDIDATES: VideoEncoder[] = [
       '-bufsize',
       `${Math.round(kbps * BITRATE_BUFSIZE_MULTIPLIER)}k`
     ]
-    // No unconditional decodeHwaccel here, unlike NVENC/cuda -- there's no Apple Silicon machine
+    // No unconditional decodeHwaccel here -- there's no Apple Silicon machine
     // available to have verified that pairing directly, so -hwaccel videotoolbox is only trusted
     // after its own real roundtrip probe passes (same treatment as QSV below), not assumed.
   }
@@ -241,7 +241,7 @@ export async function selectVideoEncoder(ffmpegBin: string, preferGpu = true): P
       if (!(await testEncoder(ffmpegBin, candidate))) continue
 
       // Intel Quick Sync's and Apple VideoToolbox's decode hwaccel aren't verified on any real
-      // machine of their kind (unlike NVENC's cuda pairing above), so each is only trusted after
+      // machine of their kind, so each is only selected after
       // its own real roundtrip probe passes.
       const unverifiedDecodeHwaccel: Record<string, string> = { h264_qsv: 'qsv', h264_videotoolbox: 'videotoolbox' }
       const probeHwaccel = unverifiedDecodeHwaccel[candidate.codec]

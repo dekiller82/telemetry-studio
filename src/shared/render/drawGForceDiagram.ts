@@ -1,6 +1,6 @@
 import type { GForceHistoryPoint, GForceReading } from '../telemetry/sampleAt'
 import { resolveFontStack } from './fonts'
-import { drawOutlinedText, fillRoundedRect, fitFontSizePx, scaleToRect, type Canvas2DLike, type Rect } from './canvas2d'
+import { drawOutlinedText, drawStaticWidgetLayer, fillRoundedRect, fitFontSizePx, scaleToRect, type Canvas2DLike, type StaticWidgetLayer, type Rect } from './canvas2d'
 
 export interface GForceDiagramStyle {
   /** Grid radius, in G -- how many G's the outer ring represents. */
@@ -68,45 +68,35 @@ export interface DrawGForceDiagramOptions {
   cts: number
   hasImuData: boolean
   fontFamily?: string
+  /** Pre-rendered static grid/background layer supplied by the headless export renderer. */
+  staticLayer?: StaticWidgetLayer | null
 }
 
 const RING_COUNT = 4
 
-/**
- * Lateral G (cornering) vs. longitudinal G (braking/accelerating) scatter -- a classic friction
- * circle. The current reading is a highlighted dot; a fading trail of recent raw readings (not
- * smoothed, unlike the dot itself -- a real friction circle is a scatter, not a smooth curve) shows
- * the car's recent grip usage sweeping around the circle. Acceleration plots up, braking plots down;
- * lateral sign follows the session's calibrated axis mapping (see shared/telemetry/imuCalibration.ts) --
- * flip `lateralInverted` in the property panel if left/right reads backwards for your footage.
- * A numeric combined-G readout (magnitude of the two axes, sqrt(lateral^2 + longitudinal^2)) sits in
- * its own header strip above the diagram when showValueReadout is on -- the diagram alone only shows
- * *where* on the circle you are, not the actual G number.
- */
-export function drawGForceDiagram(ctx: Canvas2DLike, options: DrawGForceDiagramOptions): void {
-  const { rect, style, reading, history, cts, hasImuData, fontFamily } = options
+function drawGForceBackground(ctx: Canvas2DLike, rect: Rect, style: GForceDiagramStyle): void {
+  if (style.backgroundOpacity <= 0) return
+  ctx.save()
+  ctx.globalAlpha = style.backgroundOpacity
+  ctx.fillStyle = style.backgroundColor
+  fillRoundedRect(ctx, rect.x, rect.y, rect.w, rect.h, scaleToRect(style.cornerRadius, rect))
+  ctx.restore()
+}
+
+function drawNoImuMessage(ctx: Canvas2DLike, rect: Rect, style: GForceDiagramStyle, fontFamily?: string): void {
   const fontStack = resolveFontStack(fontFamily, 'bold')
+  ctx.save()
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  const text = 'No accelerometer data'
+  fitFontSizePx(ctx, text, rect.w * 0.85, rect.h * 0.1, '600', fontStack)
+  drawOutlinedText(ctx, text, rect.x + rect.w / 2, rect.y + rect.h / 2, style.axisLabelColor, scaleToRect(1.5, rect), '#000000')
+  ctx.restore()
+}
 
-  if (style.backgroundOpacity > 0) {
-    ctx.save()
-    ctx.globalAlpha = style.backgroundOpacity
-    ctx.fillStyle = style.backgroundColor
-    fillRoundedRect(ctx, rect.x, rect.y, rect.w, rect.h, scaleToRect(style.cornerRadius, rect))
-    ctx.restore()
-  }
-
+function drawGForceGridAndLabels(ctx: Canvas2DLike, rect: Rect, style: GForceDiagramStyle, fontFamily?: string): void {
+  const fontStack = resolveFontStack(fontFamily, 'bold')
   const cx = rect.x + rect.w / 2
-
-  if (!hasImuData) {
-    ctx.save()
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const text = 'No accelerometer data'
-    fitFontSizePx(ctx, text, rect.w * 0.85, rect.h * 0.1, '600', fontStack)
-    drawOutlinedText(ctx, text, cx, rect.y + rect.h / 2, style.axisLabelColor, scaleToRect(1.5, rect), '#000000')
-    ctx.restore()
-    return
-  }
 
   // Reserved header strip for the numeric readout -- the ring diagram fills whatever's left below
   // it, same "value area carved out of the top" layout RollAngle already uses.
@@ -114,24 +104,7 @@ export function drawGForceDiagram(ctx: Canvas2DLike, options: DrawGForceDiagramO
   const diagramTop = rect.y + valueAreaH
   const diagramH = rect.h - valueAreaH
   const cy = diagramTop + diagramH / 2
-
-  if (style.showValueReadout) {
-    const combinedG = Math.sqrt(reading.lateralG * reading.lateralG + reading.longitudinalG * reading.longitudinalG)
-    const valueText = `${combinedG.toFixed(1)}G`
-    ctx.save()
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    fitFontSizePx(ctx, '0.0G', rect.w * 0.6, valueAreaH * 0.7, '700', fontStack)
-    drawOutlinedText(ctx, valueText, cx, rect.y + valueAreaH / 2, style.valueColor, scaleToRect(2, rect), '#000000')
-    ctx.restore()
-  }
-
   const radiusPx = Math.min(rect.w, diagramH) * 0.42
-  const pxPerG = radiusPx / Math.max(0.1, style.maxG)
-  const toScreen = (lateralG: number, longitudinalG: number): { x: number; y: number } => ({
-    x: cx + lateralG * pxPerG,
-    y: cy - longitudinalG * pxPerG
-  })
 
   if (style.ringOpacity > 0) {
     ctx.save()
@@ -169,6 +142,48 @@ export function drawGForceDiagram(ctx: Canvas2DLike, options: DrawGForceDiagramO
     ctx.fillText('RIGHT', rect.x + rect.w - 4, cy)
     ctx.restore()
   }
+}
+
+/** Draws the G-force background, grid, labels, or no-IMU message into a local cache canvas. */
+export function drawGForceStaticLayer(ctx: Canvas2DLike, rect: Rect, style: GForceDiagramStyle, hasImuData: boolean, fontFamily?: string): void {
+  drawGForceBackground(ctx, rect, style)
+  if (hasImuData) drawGForceGridAndLabels(ctx, rect, style, fontFamily)
+  else drawNoImuMessage(ctx, rect, style, fontFamily)
+}
+
+function drawGForceDynamicContent(
+  ctx: Canvas2DLike,
+  rect: Rect,
+  style: GForceDiagramStyle,
+  reading: GForceReading,
+  history: GForceHistoryPoint[],
+  cts: number,
+  fontFamily?: string
+): void {
+  const fontStack = resolveFontStack(fontFamily, 'bold')
+  const cx = rect.x + rect.w / 2
+  const valueAreaH = style.showValueReadout ? rect.h * 0.22 : 0
+  const diagramTop = rect.y + valueAreaH
+  const diagramH = rect.h - valueAreaH
+  const cy = diagramTop + diagramH / 2
+
+  if (style.showValueReadout) {
+    const combinedG = Math.sqrt(reading.lateralG * reading.lateralG + reading.longitudinalG * reading.longitudinalG)
+    const valueText = `${combinedG.toFixed(1)}G`
+    ctx.save()
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    fitFontSizePx(ctx, '0.0G', rect.w * 0.6, valueAreaH * 0.7, '700', fontStack)
+    drawOutlinedText(ctx, valueText, cx, rect.y + valueAreaH / 2, style.valueColor, scaleToRect(2, rect), '#000000')
+    ctx.restore()
+  }
+
+  const radiusPx = Math.min(rect.w, diagramH) * 0.42
+  const pxPerG = radiusPx / Math.max(0.1, style.maxG)
+  const toScreen = (lateralG: number, longitudinalG: number): { x: number; y: number } => ({
+    x: cx + lateralG * pxPerG,
+    y: cy - longitudinalG * pxPerG
+  })
 
   if (style.trailDurationMs > 0) {
     ctx.save()
@@ -197,4 +212,24 @@ export function drawGForceDiagram(ctx: Canvas2DLike, options: DrawGForceDiagramO
   ctx.arc(dot.x, dot.y, dotRadius, 0, Math.PI * 2)
   ctx.fill()
   ctx.restore()
+}
+
+/**
+ * Lateral G (cornering) vs. longitudinal G (braking/accelerating) scatter -- a classic friction
+ * circle. The current reading is a highlighted dot; a fading trail of recent raw readings (not
+ * smoothed, unlike the dot itself -- a real friction circle is a scatter, not a smooth curve) shows
+ * the car's recent grip usage sweeping around the circle. Acceleration plots up, braking plots down;
+ * lateral sign follows the session's calibrated axis mapping (see shared/telemetry/imuCalibration.ts) --
+ * flip `lateralInverted` in the property panel if left/right reads backwards for your footage.
+ * A numeric combined-G readout (magnitude of the two axes, sqrt(lateral^2 + longitudinal^2)) sits in
+ * its own header strip above the diagram when showValueReadout is on -- the diagram alone only shows
+ * *where* on the circle you are, not the actual G number.
+ */
+export function drawGForceDiagram(ctx: Canvas2DLike, options: DrawGForceDiagramOptions): void {
+  const { rect, style, reading, history, cts, hasImuData, fontFamily, staticLayer } = options
+
+  if (staticLayer) drawStaticWidgetLayer(ctx, rect, staticLayer)
+  else drawGForceStaticLayer(ctx, rect, style, hasImuData, fontFamily)
+
+  if (hasImuData) drawGForceDynamicContent(ctx, rect, style, reading, history, cts, fontFamily)
 }

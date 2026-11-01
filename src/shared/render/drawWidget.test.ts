@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Canvas2DLike } from './canvas2d'
+import type { Canvas2DLike, CanvasImageLike } from './canvas2d'
 import { drawWidget, type WidgetDrawContext } from './drawWidget'
 import { createWidget } from '../widgets/defaults'
+import { prepareGpsTrackView } from './gpsTrackView'
 
 function mockCanvas(): Canvas2DLike {
   const noop = (): void => undefined
@@ -18,7 +19,7 @@ function mockCanvas(): Canvas2DLike {
     fill: vi.fn(),
     clearRect: noop,
     fillRect: vi.fn(),
-    drawImage: noop,
+    drawImage: vi.fn(),
     fillText: vi.fn(),
     strokeText: vi.fn(),
     measureText: () => ({ width: 20 }),
@@ -164,5 +165,47 @@ describe('drawWidget gpsTrack trimAware', () => {
     const widget = createWidget('gpsTrack')
     drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, trimAwareContext(500))
     expect(ctx.arc).not.toHaveBeenCalled()
+  })
+
+  it('uses a cache built for prepared cropped geometry instead of re-drawing its segments', () => {
+    const ctx = mockCanvas()
+    const widget = trimAwareGpsWidget()
+    widget.style.colorMode = 'speed'
+    const data = trimAwareContext(1500)
+    data.preparedGpsTrack = prepareGpsTrackView({
+      trackPoints: data.trackPoints, bounds: data.bounds,
+      trackCts: data.trackCts!, trackSpeeds: data.trackSpeeds!
+    }, data.trimStartMs, data.sessionEndMs)
+    const cache = { width: 400, height: 400 } as CanvasImageLike
+    data.speedBounds = { min: 0, max: 2 }
+    data.coloredTrackImage = cache
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    expect(ctx.drawImage).toHaveBeenCalledWith(cache, 0, 0, 400, 400)
+    expect(ctx.arc).toHaveBeenCalled()
+  })
+
+  it('keeps an untrimmed colored cache when the supplied range covers every sample', () => {
+    const ctx = mockCanvas()
+    const widget = trimAwareGpsWidget()
+    widget.style.colorMode = 'speed'
+    const data = trimAwareContext(1500)
+    data.trimStartMs = 0
+    data.sessionEndMs = 3000
+    data.speedBounds = { min: 0, max: 2 }
+    data.coloredTrackImage = { width: 400, height: 400 } as CanvasImageLike
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    expect(ctx.drawImage).toHaveBeenCalled()
+  })
+
+  it('does not reuse a legacy full-track cache for an unprepared partial trim', () => {
+    const ctx = mockCanvas()
+    const widget = trimAwareGpsWidget()
+    widget.style.colorMode = 'speed'
+    const data = trimAwareContext(1500)
+    data.speedBounds = { min: 0, max: 2 }
+    data.coloredTrackImage = { width: 400, height: 400 } as CanvasImageLike
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    expect(ctx.drawImage).not.toHaveBeenCalled()
+    expect(ctx.stroke).toHaveBeenCalled()
   })
 })

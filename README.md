@@ -98,6 +98,11 @@ speedometer widgets running together over real footage.
   (NVIDIA NVENC, Intel Quick Sync, AMD AMF) before trusting it, falling back to CPU (libx264) if
   none is available or the GPU encoder fails partway through. See [GPU acceleration](#gpu-acceleration)
   below for exactly what's accelerated on which vendor.
+- **Bounded export rendering** — two background workers generate HUD frames in order, with one
+  outstanding frame per worker and FFmpeg backpressure. Static layers and eligible speed graphs
+  are cached, and the transparent overlay is cropped when its bounds can be safely determined.
+  Cancellation preserves an existing destination, and an export cannot replace an imported source.
+  See [export performance and diagnostics](docs/export-performance.md) for measurements and limits.
 
 ## Widgets
 
@@ -262,7 +267,10 @@ GitHub Actions matrix, triggered by pushing a `v*.*.*` tag.
 Export runs everything through ffmpeg. On startup of each export, `selectVideoEncoder` (see
 [`src/main/export/gpuEncoder.ts`](src/main/export/gpuEncoder.ts)) tries, in order:
 
-1. **NVIDIA NVENC** (`h264_nvenc`) — encode *and* decode (`-hwaccel cuda`) both run on the GPU.
+1. **NVIDIA NVENC** (`h264_nvenc`) — GPU encode. CUDA decode is enabled after a separate probe
+   produces a hardware frame from each source overlapping the trim range. If that probe fails,
+   NVENC encoding is retained with software decode. Input decoder threads are capped at four to
+   avoid exceeding NVDEC's decode-surface limit on hosts with many logical CPUs.
 2. **Intel Quick Sync** (`h264_qsv`) — encode always attempted; GPU-accelerated decode
    (`-hwaccel qsv`) is additionally enabled only after its own real decode+encode roundtrip probe
    passes on your machine, since QSV decode support varies more by driver/platform than NVENC's.
@@ -285,6 +293,11 @@ Every candidate is verified with a real, throwaway ffmpeg run before being trust
 is guessed from the vendor name alone. The currently-selected encoder is shown in the export
 progress bar.
 
+HUD drawing and FFmpeg's ordinary `overlay` composition still run on the CPU. The encoder label
+alone does not prove that decoding or composition ran on the GPU. Each attempt prints one bounded
+`[export:profile]` record; [the diagnostics guide](docs/export-performance.md) explains how to
+distinguish a requested hardware decoder, a passed startup probe, and a detected runtime fallback.
+
 ## Architecture
 
 ```
@@ -298,7 +311,7 @@ src/
 
 Each widget follows the same pattern: a style interface + defaults in
 `shared/render/draw<Widget>.ts`, wired into `shared/render/drawWidget.ts` (the dispatch used by
-both the live preview and the export renderer, so they're pixel-identical), `shared/widgets/defaults.ts`,
+both the live preview and the export renderer, sharing the same drawing rules), `shared/widgets/defaults.ts`,
 `shared/project/schema.ts`, and a section in `PropertyPanel.tsx`.
 
 Telemetry (GPS/ACCL/GYRO/GRAV) is parsed once per import via `gopro-telemetry`, normalized into a

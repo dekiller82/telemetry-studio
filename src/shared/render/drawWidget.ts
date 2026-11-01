@@ -1,5 +1,5 @@
 import type { ProjectedPoint } from '../telemetry/interpolate'
-import { computeBounds, trimTrack, type TrackBounds } from '../telemetry/sampleAt'
+import type { TrackBounds } from '../telemetry/sampleAt'
 import type { LapState } from '../telemetry/laps'
 import type { SectorState } from '../telemetry/sectors'
 import type { DeltaState } from '../telemetry/deltaTime'
@@ -9,15 +9,16 @@ import type { ElevationProfilePoint, GForceHistoryPoint, GForceReading, RollAngl
 import type { AccelRunState } from '../telemetry/accelRuns'
 import { FORMULA1_FONT_ID } from './fonts'
 import type { WidgetInstance } from '../types'
-import type { Canvas2DLike, CanvasImageLike, Rect } from './canvas2d'
+import type { Canvas2DLike, CanvasImageLike, StaticWidgetLayer, Rect } from './canvas2d'
 import { drawGpsWidget } from './drawGpsWidget'
+import { prepareGpsTrackView, type GpsTrackView } from './gpsTrackView'
 import { drawSpeedometerAnalog, drawSpeedometerDigital } from './drawSpeedometer'
 import { drawTimer } from './drawTimer'
 import { drawSectorTimer } from './drawSectorTimer'
 import { drawDeltaTime } from './drawDeltaTime'
 import { drawPredictiveLapTimer } from './drawPredictiveLapTimer'
 import { drawApexSpeedCallout } from './drawApexSpeedCallout'
-import { drawSpeedDistanceGraph } from './drawSpeedDistanceGraph'
+import { drawSpeedDistanceGraph, type SpeedDistanceGraphCache } from './drawSpeedDistanceGraph'
 import { drawGForceDiagram } from './drawGForceDiagram'
 import { drawRollAngle } from './drawRollAngle'
 import { drawSessionSummary, type SessionSummaryData } from './drawSessionSummary'
@@ -61,6 +62,9 @@ export interface WidgetDrawContext {
    *  buildColoredGpsTrackCache. Pre-rendered by the caller once and reused across frames instead of
    *  re-stroking every track segment on every single frame. */
   coloredTrackImage?: CanvasImageLike | null
+  /** GPS geometry prepared for this widget's trim range. coloredTrackImage, when provided,
+   *  must be built against this same view. Preview memoizes it; export prepares it once. */
+  preparedGpsTrack?: GpsTrackView
   /** Only relevant for a 'gpsTrack' widget with style.showGhost -- see DeltaState.ghostCts /
    *  drawGpsWidget's own doc comment for why this is resolved at the baseline lap's matching
    *  elapsed time, not distance. Resolved by the caller via sampler.positionAt(deltaState.ghostCts). */
@@ -72,6 +76,9 @@ export interface WidgetDrawContext {
    *  once (don't depend on cts); the current-lap trace is resolved fresh every frame. */
   lapSpeedTraces?: LapSpeedTrace[]
   currentLapSpeedTrace?: LapSpeedTrace | null
+  speedDistanceGraphCache?: SpeedDistanceGraphCache
+  /** Static widget layers pre-rendered once by the export renderer and composited before dynamic data. */
+  staticWidgetLayers?: ReadonlyMap<string, StaticWidgetLayer>
   /** Only relevant for 'gForceDiagram'/'rollAngle' widgets -- resolved per widget instance (each has
    *  its own smoothing/manual-axis-override style), not shared globally. */
   gForceReading?: GForceReading
@@ -126,34 +133,27 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
       // excluded from the map without needing the GPS filter itself to catch it. Falls back to the
       // untrimmed shape if the caller didn't supply a trim range.
       const trimAware = widget.style.trimAware && data.trimStartMs !== undefined && data.sessionEndMs !== undefined
-      let trackPoints = data.trackPoints
-      let bounds = data.bounds
-      let trackSpeeds = data.trackSpeeds
-      let trackCts = data.trackCts
-      // The cached colorMode 'speed'/'braking' image was pre-rendered against the UNTRIMMED shape --
-      // wrong to reuse once the shape itself has been cropped, so fall back to drawGpsWidget's own
-      // fresh-draw path (it already exists for the 'window' viewMode case) instead of showing stale
-      // pixels that don't match the new bounds.
-      let coloredTrackImage = data.coloredTrackImage
-      let showDot = hasGpsPosition
-      if (trimAware) {
-        const sliced = trimTrack(data.trackPoints, data.trackCts ?? [], data.trackSpeeds ?? [], data.trimStartMs!, data.sessionEndMs!)
-        trackPoints = sliced.trackPoints
-        bounds = computeBounds(trackPoints)
-        trackSpeeds = sliced.trackSpeeds
-        trackCts = sliced.trackCts
-        coloredTrackImage = null
-        showDot = showDot && data.cts >= data.trimStartMs! && data.cts <= data.sessionEndMs!
+      const sourceTrack: GpsTrackView = {
+        trackPoints: data.trackPoints,
+        bounds: data.bounds,
+        trackSpeeds: data.trackSpeeds ?? [],
+        trackCts: data.trackCts ?? []
       }
+      const track = data.preparedGpsTrack ??
+        (trimAware ? prepareGpsTrackView(sourceTrack, data.trimStartMs, data.sessionEndMs) : sourceTrack)
+      // A caller-supplied cache matches its prepared geometry. Legacy callers can still draw
+      // correctly without preparation, but their old untrimmed cache must be dropped after a crop.
+      const coloredTrackImage = data.preparedGpsTrack || track === sourceTrack ? data.coloredTrackImage : null
+      const showDot = hasGpsPosition && (!trimAware || (data.cts >= data.trimStartMs! && data.cts <= data.sessionEndMs!))
       drawGpsWidget(ctx, {
         rect,
         style: widget.style,
-        trackPoints,
-        bounds,
+        trackPoints: track.trackPoints,
+        bounds: track.bounds,
         dotPosition: data.dotPosition,
         showDot,
-        trackSpeeds,
-        trackCts,
+        trackSpeeds: track.trackSpeeds,
+        trackCts: track.trackCts,
         speedBounds: data.speedBounds,
         coloredTrackImage,
         ghostPosition: data.ghostPosition,
@@ -163,11 +163,23 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
     }
     case 'speedometerAnalog':
       if (!hasGpsPosition) return
-      drawSpeedometerAnalog(ctx, { rect, style: widget.style, speedMps: data.speedMps, fontFamily })
+      drawSpeedometerAnalog(ctx, {
+        rect,
+        style: widget.style,
+        speedMps: data.speedMps,
+        fontFamily,
+        staticLayer: data.staticWidgetLayers?.get(widget.id) ?? null
+      })
       return
     case 'speedometerDigital':
       if (!hasGpsPosition) return
-      drawSpeedometerDigital(ctx, { rect, style: widget.style, speedMps: data.speedMps, fontFamily })
+      drawSpeedometerDigital(ctx, {
+        rect,
+        style: widget.style,
+        speedMps: data.speedMps,
+        fontFamily,
+        staticLayer: data.staticWidgetLayers?.get(widget.id) ?? null
+      })
       return
     case 'timer':
       drawTimer(ctx, {
@@ -194,6 +206,7 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
       return
     case 'speedDistanceGraph':
       drawSpeedDistanceGraph(ctx, {
+        cache: data.speedDistanceGraphCache,
         rect,
         style: widget.style,
         lapTraces: data.lapSpeedTraces ?? [],
@@ -209,7 +222,8 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
         history: data.gForceHistory ?? [],
         cts: data.cts,
         hasImuData: data.hasImuData ?? false,
-        fontFamily
+        fontFamily,
+        staticLayer: data.staticWidgetLayers?.get(widget.id) ?? null
       })
       return
     case 'rollAngle':

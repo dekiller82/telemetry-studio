@@ -54,6 +54,17 @@ export interface CanvasImageLike {
   height: number
 }
 
+/** An unscaled raster layer with padding and the original widget's fractional pixel phase. */
+export interface StaticWidgetLayer {
+  image: CanvasImageLike
+  offsetX: number
+  offsetY: number
+}
+
+export function drawStaticWidgetLayer(ctx: Canvas2DLike, rect: Rect, layer: StaticWidgetLayer): void {
+  ctx.drawImage(layer.image, rect.x + layer.offsetX, rect.y + layer.offsetY, layer.image.width, layer.image.height)
+}
+
 /**
  * Fills a rounded-rect panel using only primitives already in Canvas2DLike (no native `roundRect`
  * in this minimal interface) -- quadraticCurveTo with the actual corner point as control point

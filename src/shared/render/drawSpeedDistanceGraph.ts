@@ -61,6 +61,13 @@ export interface DrawSpeedDistanceGraphOptions {
   /** The lap currently in progress, recomputed by the caller every frame (grows as the lap continues). Null if no start/finish line is set. */
   currentLapTrace: LapSpeedTrace | null
   fontFamily?: string
+  /** Optional bounded export cache. Preview keeps the same immediate drawing path. */
+  cache?: SpeedDistanceGraphCache
+}
+
+export interface SpeedDistanceGraphCache {
+  /** Return false when a size/mode cannot be cached without changing its appearance. */
+  draw(ctx: Canvas2DLike, options: DrawSpeedDistanceGraphOptions): boolean
 }
 
 const GOLDEN_ANGLE_DEG = 137.508
@@ -95,6 +102,12 @@ interface BuiltGraph {
   domainEnd: number
   /** Non-null only in 'window' mode -- where to draw the "now" marker. */
   nowDistance: number | null
+}
+
+export interface PreparedSpeedDistanceGraph extends BuiltGraph {
+  minSpeed: number
+  maxSpeed: number
+  speedSpan: number
 }
 
 function buildFullLapSegments(lapTraces: LapSpeedTrace[], currentLapTrace: LapSpeedTrace | null, style: SpeedDistanceGraphStyle): BuiltGraph | null {
@@ -163,10 +176,39 @@ function buildWindowSegments(lapTraces: LapSpeedTrace[], currentLapTrace: LapSpe
  * laps' preview of what's coming up.
  */
 export function drawSpeedDistanceGraph(ctx: Canvas2DLike, options: DrawSpeedDistanceGraphOptions): void {
-  const { rect, style, lapTraces, currentLapTrace, fontFamily } = options
+  if (options.cache?.draw(ctx, options)) return
+  drawSpeedDistanceGraphLayer(ctx, options, prepareSpeedDistanceGraph(options), 'all')
+}
+
+export function prepareSpeedDistanceGraph(options: DrawSpeedDistanceGraphOptions): PreparedSpeedDistanceGraph | null {
+  const { style, lapTraces, currentLapTrace } = options
+  const built = style.viewMode === 'window'
+    ? buildWindowSegments(lapTraces, currentLapTrace, style)
+    : buildFullLapSegments(lapTraces, currentLapTrace, style)
+  if (!built || built.domainEnd - built.domainStart <= 0) return null
+  let maxSpeed = 0
+  let minSpeed = Infinity
+  for (const seg of built.segments) {
+    for (const point of seg.points) {
+      if (point.speedMps > maxSpeed) maxSpeed = point.speedMps
+      if (point.speedMps < minSpeed) minSpeed = point.speedMps
+    }
+  }
+  return maxSpeed > 0 ? { ...built, minSpeed, maxSpeed, speedSpan: maxSpeed - minSpeed || 1 } : null
+}
+
+/** Reference layer precedes the current trace in the immediate renderer too. Keeping this order
+ * allows export to reuse axes/history while retaining the current trace's glow and labels. */
+export function drawSpeedDistanceGraphLayer(
+  ctx: Canvas2DLike,
+  options: DrawSpeedDistanceGraphOptions,
+  graph: PreparedSpeedDistanceGraph | null,
+  layer: 'all' | 'reference' | 'current'
+): void {
+  const { rect, style, fontFamily } = options
   const fontStack = resolveFontStack(fontFamily, 'bold')
 
-  if (style.backgroundOpacity > 0) {
+  if (layer !== 'current' && style.backgroundOpacity > 0) {
     ctx.save()
     ctx.globalAlpha = style.backgroundOpacity
     ctx.fillStyle = style.backgroundColor
@@ -174,26 +216,10 @@ export function drawSpeedDistanceGraph(ctx: Canvas2DLike, options: DrawSpeedDist
     ctx.restore()
   }
 
-  const built =
-    style.viewMode === 'window'
-      ? buildWindowSegments(lapTraces, currentLapTrace, style)
-      : buildFullLapSegments(lapTraces, currentLapTrace, style)
-  if (!built) return
-  const { segments, domainStart, domainEnd, nowDistance } = built
-  if (domainEnd - domainStart <= 0) return
-
-  let maxSpeed = 0
-  let minSpeed = Infinity
-  for (const seg of segments) {
-    for (const p of seg.points) {
-      if (p.speedMps > maxSpeed) maxSpeed = p.speedMps
-      if (p.speedMps < minSpeed) minSpeed = p.speedMps
-    }
-  }
-  if (maxSpeed <= 0) return
+  if (!graph) return
+  const { segments, domainStart, domainEnd, nowDistance, minSpeed, maxSpeed, speedSpan } = graph
   // The slowest point across every shown segment anchors the bottom of the y-axis (instead of a
   // fixed 0) -- uses the full vertical range for whatever speed band was actually driven/is visible.
-  const speedSpan = maxSpeed - minSpeed || 1
 
   // Reserve a right-hand margin so a full-length trace's end-of-line lap-number label has room --
   // otherwise it would get clipped at the widget's own right edge.
@@ -210,7 +236,7 @@ export function drawSpeedDistanceGraph(ctx: Canvas2DLike, options: DrawSpeedDist
   const xAt = (distanceM: number): number => plotX + ((distanceM - domainStart) / (domainEnd - domainStart)) * plotW
   const yAt = (speedMps: number): number => rect.y + rect.h - bottomPad - ((speedMps - minSpeed) / speedSpan) * plotH
 
-  if (style.gridOpacity > 0) {
+  if (layer !== 'current' && style.gridOpacity > 0) {
     ctx.save()
     ctx.globalAlpha = style.gridOpacity
     ctx.strokeStyle = style.gridColor
@@ -243,7 +269,7 @@ export function drawSpeedDistanceGraph(ctx: Canvas2DLike, options: DrawSpeedDist
 
   // "Now" marker, window mode only -- drawn before the lap lines so it sits behind them, separating
   // the already-happened portion (left) from the reference laps' preview of what's coming (right).
-  if (nowDistance !== null) {
+  if (layer !== 'current' && nowDistance !== null) {
     ctx.save()
     ctx.globalAlpha = 0.5
     ctx.strokeStyle = style.axisLabelColor
@@ -260,6 +286,7 @@ export function drawSpeedDistanceGraph(ctx: Canvas2DLike, options: DrawSpeedDist
   const outlineWidth = scaleToRect(1.5, rect)
 
   for (const seg of segments) {
+    if ((layer === 'current' && !seg.isCurrent) || (layer === 'reference' && seg.isCurrent)) continue
     ctx.save()
     ctx.globalAlpha = seg.opacity
     ctx.strokeStyle = seg.color
