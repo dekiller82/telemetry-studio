@@ -10,6 +10,7 @@ import { resolveUnpackedBinaryPath } from '../app/binaryPath'
 import { createExportJobId, ExportAttemptProfiler } from './exportProfiling'
 import { assertSafeExportOutput, attemptOutputPath, commitAttemptOutput, removeAttemptFile, ExportOutputRecoveryError } from './exportOutput'
 import { ExportCancelledError } from './exportCancellation'
+import { InsufficientDiskSpaceError, isDiskFullError } from './exportDiskSpace'
 import { createExportProcessWaiter } from './exportProcessWaiter'
 import type { OverlayRoi } from './overlayRoi'
 import { createParallelFrameRenderer, type ExportFrameSource, type RenderedFrame } from './parallelFrameRenderer'
@@ -18,6 +19,7 @@ import { getExportIconsDirectory } from './loadIcons'
 import { CUDA_DECODE_THREADS, probeCudaInput } from './inputDecode'
 
 export { ExportCancelledError } from './exportCancellation'
+export { InsufficientDiskSpaceError } from './exportDiskSpace'
 
 export interface ExportSettings {
   width: number
@@ -767,6 +769,8 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     // recover from, the user asked to stop.
     if (err instanceof ExportCancelledError) throw err
     if (signal?.aborted) throw new ExportCancelledError()
+    // A full destination disk is not an encoder fault; a CPU retry would just fill it again.
+    if (isDiskFullError(err)) throw new InsufficientDiskSpaceError(outputPath, err)
     // Only a typed ffmpeg failure containing a hardware-backend diagnostic is retryable. Render,
     // input, disk, and output-path errors must surface immediately instead of causing a full second
     // export that cannot fix the underlying problem.

@@ -10,7 +10,7 @@ import { defaultChangelogPath, readChangelog } from '../app/changelog'
 import { checkForUpdate } from '../app/updateCheck'
 import { SUPPORTS_IN_APP_UPDATE, startUpdate, quitAndInstallUpdate } from '../app/updater'
 import { listSystemFonts } from '../app/systemFonts'
-import { runExport, ExportCancelledError } from '../export/runExport'
+import { runExport, ExportCancelledError, InsufficientDiskSpaceError } from '../export/runExport'
 import { createTelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { findDeliveryPreset, resolvePresetDimensions } from '../../shared/export/deliveryPresets'
 import type { ImportResult, ProjectPayload, VideoMeta, WidgetInstance, WidgetLayoutPreset, RecentProject, UpdateCheckResult } from '../../shared/types'
@@ -203,6 +203,20 @@ export function registerIpcHandlers(): void {
         // runExport owns its temporary file and only publishes after success. Leave any
         // pre-existing destination intact when the user cancels.
         event.sender.send('export:cancelled')
+        return null
+      }
+      if (err instanceof InsufficientDiskSpaceError) {
+        // runExport already removed its partial temporary file and left any existing destination
+        // intact. Treat this like a cancel in the UI, but tell the user why it stopped.
+        event.sender.send('export:cancelled')
+        const options = {
+          type: 'error' as const,
+          title: 'Export stopped: not enough disk space',
+          message: 'There is not enough free space to finish this export.',
+          detail: `The export was cancelled and the partial file was removed. Free up space on the drive containing ${err.outputPath}, or export to a different drive, then try again.`
+        }
+        if (win && !win.isDestroyed()) await dialog.showMessageBox(win, options)
+        else await dialog.showMessageBox(options)
         return null
       }
       throw err

@@ -256,7 +256,7 @@ describe('runExport lifecycle and source protection', () => {
     expect(child.stdin.listenerCount('error')).toBe(0)
   })
 
-  it.each(['Permission denied', 'No space left on device', 'Invalid data found when processing input'])(
+  it.each(['Permission denied', 'Invalid data found when processing input'])(
     'does not retry a non-hardware FFmpeg error (%s) merely because NVENC was selected', async (diagnostic) => {
       mocks.selectEncoder.mockResolvedValue({ codec: 'h264_nvenc', label: 'NVIDIA NVENC', qualityArgs: () => [], bitrateArgs: () => [] })
       source.renderFrame = vi.fn(() => new Promise<never>(() => {}))
@@ -273,6 +273,24 @@ describe('runExport lifecycle and source protection', () => {
       expect(mocks.publish).not.toHaveBeenCalled()
     }
   )
+
+  it('stops with InsufficientDiskSpaceError, without a CPU retry, when the disk fills on the NVENC path', async () => {
+    mocks.selectEncoder.mockResolvedValue({ codec: 'h264_nvenc', label: 'NVIDIA NVENC', qualityArgs: () => [], bitrateArgs: () => [] })
+    source.renderFrame = vi.fn(() => new Promise<never>(() => {}))
+    mocks.spawn.mockImplementationOnce(() => {
+      setTimeout(() => {
+        // Real ffmpeg line: the stream label names the encoder, which looks like a hardware fault.
+        child.stderr.write('[vost#0:0/h264_nvenc @ 000001adbc870600] Error submitting a packet to the muxer: No space left on device\n')
+        child.close(4294967268)
+      }, 5)
+      return child
+    })
+    const config = options()
+    await expect(runExport(config)).rejects.toMatchObject({ name: 'InsufficientDiskSpaceError', outputPath: config.outputPath })
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+    expect(mocks.publish).not.toHaveBeenCalled()
+    expect(mocks.remove).toHaveBeenCalled()
+  })
 
   it('passes cancellation through publication and still cleans up the attempt and workers', async () => {
     const controller = new AbortController()
