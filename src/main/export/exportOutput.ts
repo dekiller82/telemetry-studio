@@ -66,8 +66,15 @@ export async function removeAttemptFile(filePath: string): Promise<void> {
 }
 
 export function attemptOutputPath(outputPath: string, jobId: string, attemptId: number): string {
-  // Keep the final .mp4 extension so ffmpeg selects the same muxer as the user-facing output.
-  return `${outputPath}.telemetry-studio-${jobId}-${attemptId}.tmp.mp4`
+  // Retain the output container for both MP4 videos and transparent MOVs.
+  const extension = path.extname(outputPath) || '.mp4'
+  return `${outputPath}.telemetry-studio-${jobId}-${attemptId}.tmp${extension}`
+}
+
+export function assertTransparentOutputContainer(outputPath: string): void {
+  if (path.extname(outputPath).toLowerCase() !== '.mov') {
+    throw new Error('Transparent HUD exports require a .mov file name. Choose a MOV output file.')
+  }
 }
 
 /**

@@ -13,6 +13,7 @@ import { listSystemFonts } from '../app/systemFonts'
 import { runExport, ExportCancelledError, InsufficientDiskSpaceError } from '../export/runExport'
 import { createTelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { findDeliveryPreset, resolvePresetDimensions } from '../../shared/export/deliveryPresets'
+import { exportWidgets, overlayExportRequestSchema, type OverlayExportRequest } from '../../shared/export/overlayExport'
 import type { ImportResult, ProjectPayload, VideoMeta, WidgetInstance, WidgetLayoutPreset, RecentProject, UpdateCheckResult } from '../../shared/types'
 
 const PROJECT_FILTERS = [{ name: 'Telemetry Studio Project', extensions: ['gpo'] }]
@@ -146,11 +147,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('updater:start', (): void => startUpdate())
   ipcMain.handle('updater:quitAndInstall', (): void => quitAndInstallUpdate())
 
-  ipcMain.handle('export:start', async (event, payload: ProjectPayload, deliveryPresetId?: string): Promise<string | null> => {
+  ipcMain.handle('export:start', async (event, payload: ProjectPayload, deliveryPresetId?: string, rawRequest?: OverlayExportRequest): Promise<string | null> => {
+    const request = overlayExportRequestSchema.parse(rawRequest ?? {})
+    const widgets = exportWidgets(payload.widgets, request)
+    const transparent = request.format !== 'video'
+    const saveOptions = transparent
+      ? { filters: [{ name: 'Transparent MOV', extensions: ['mov'] }], defaultPath: 'overlay.mov' }
+      : { filters: [{ name: 'MP4 Video', extensions: ['mp4'] }], defaultPath: 'export.mp4' }
     const win = BrowserWindow.getFocusedWindow()
     const result = win
-      ? await dialog.showSaveDialog(win, { filters: [{ name: 'MP4 Video', extensions: ['mp4'] }], defaultPath: 'export.mp4' })
-      : await dialog.showSaveDialog({ filters: [{ name: 'MP4 Video', extensions: ['mp4'] }], defaultPath: 'export.mp4' })
+      ? await dialog.showSaveDialog(win, saveOptions)
+      : await dialog.showSaveDialog(saveOptions)
 
     if (result.canceled || !result.filePath) return null
 
@@ -160,7 +167,7 @@ export function registerIpcHandlers(): void {
 
     // No preset (or an unrecognized id) -- the default "source quality" export, byte-for-byte
     // the same settings this app has always used: native resolution, quality-based (CRF) encode.
-    const preset = deliveryPresetId ? findDeliveryPreset(deliveryPresetId) : null
+    const preset = !transparent && deliveryPresetId ? findDeliveryPreset(deliveryPresetId) : null
     const { width, height } = preset
       ? resolvePresetDimensions(preset, referenceVideo.width, referenceVideo.height)
       : { width: referenceVideo.width, height: referenceVideo.height }
@@ -172,7 +179,7 @@ export function registerIpcHandlers(): void {
       await runExport({
         clips,
         outputPath: result.filePath,
-        widgets: payload.widgets,
+        widgets,
         sampler,
         telemetry: payload.imported.telemetry,
         startFinish: payload.startFinish,
@@ -183,12 +190,14 @@ export function registerIpcHandlers(): void {
         trimEndMs: payload.trimEndMs,
         defaultFontFamily: payload.defaultFontFamily,
         settings: {
+          format: request.format,
           width,
           height,
           fps: referenceVideo.fps || 30,
           crf: EXPORT_CRF,
           videoBitrateKbps: preset?.videoBitrateKbps,
-          audioBitrateKbps: preset?.audioBitrateKbps
+          audioBitrateKbps: preset?.audioBitrateKbps,
+          renderWorkers: request.renderWorkers
         },
         onProgress: (done, total) => {
           event.sender.send('export:progress', { done, total })

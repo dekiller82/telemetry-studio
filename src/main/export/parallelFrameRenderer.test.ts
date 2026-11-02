@@ -82,9 +82,10 @@ beforeEach(() => {
 })
 
 describe('parallel frame renderer', () => {
-  it('forwards the same lap detection radius and deleted crossings to both workers', async () => {
+  it.each([2, 3, 4] as const)('forwards lap detection settings and manual crossings to all %i workers', async (workerCount) => {
     const configured = { ...data, startFinishRadiusM: 6, ignoredCrossings: { '1': true }, crossingAdjustmentsMs: { '2': 40 } }
-    const source = await createParallelFrameRenderer(configured)
+    const source = await createParallelFrameRenderer(configured, undefined, workerCount)
+    expect(workers()).toHaveLength(workerCount)
     for (const worker of workers()) {
       expect(worker.workerData.startFinishRadiusM).toBe(6)
       expect(worker.workerData.ignoredCrossings).toEqual({ '1': true })
@@ -93,58 +94,56 @@ describe('parallel frame renderer', () => {
     await source.close()
   })
 
-  it('bounds work to one outstanding frame per worker and returns the requested frames', async () => {
-    const source = await createParallelFrameRenderer(data)
-    expect(source.workerCount).toBe(2)
-    expect(source.prefetchCount).toBe(2)
-    expect(workers()).toHaveLength(2)
+  it.each([2, 3, 4] as const)('bounds %i workers and preserves frame identities when replies arrive backwards', async (workerCount) => {
+    const source = await createParallelFrameRenderer(data, undefined, workerCount)
+    expect(source.workerCount).toBe(workerCount)
+    expect(source.prefetchCount).toBe(workerCount)
+    expect(workers()).toHaveLength(workerCount)
 
-    const first = source.renderFrame(0, 0, 0)
-    const second = source.renderFrame(1, 20, 20)
-    expect(workers()[0].requests).toHaveLength(1)
-    expect(workers()[1].requests).toHaveLength(1)
-    await expect(source.renderFrame(2, 40, 40)).rejects.toThrow('still busy')
+    const frames = Array.from({ length: workerCount }, (_, index) => source.renderFrame(index, index * 20, index * 20))
+    expect(workers().every(worker => worker.requests.length === 1)).toBe(true)
+    await expect(source.renderFrame(workerCount, 60, 60)).rejects.toThrow('still busy')
+    for (let index = workerCount - 1; index >= 0; index--) {
+      workers()[index].emit('message', { kind: 'frame', index, pixels: Uint8Array.of(index), renderMs: 2 })
+    }
+    expect((await Promise.all(frames)).map(frame => frame.pixels[0])).toEqual(Array.from({ length: workerCount }, (_, index) => index))
 
-    workers()[1].emit('message', { kind: 'frame', index: 1, pixels: Uint8Array.of(1), renderMs: 2 })
-    workers()[0].emit('message', { kind: 'frame', index: 0, pixels: Uint8Array.of(0), renderMs: 3 })
-    expect((await first).pixels[0]).toBe(0)
-    expect((await second).pixels[0]).toBe(1)
-
-    const third = source.renderFrame(2, 40, 40)
+    const next = source.renderFrame(workerCount, 60, 60)
     expect(workers()[0].requests).toHaveLength(2)
-    workers()[0].emit('message', { kind: 'frame', index: 2, pixels: Uint8Array.of(2), renderMs: 4 })
-    expect((await third).pixels[0]).toBe(2)
+    workers()[0].emit('message', { kind: 'frame', index: workerCount, pixels: Uint8Array.of(workerCount), renderMs: 4 })
+    expect((await next).pixels[0]).toBe(workerCount)
     await source.close()
     expect(workers().every((worker) => worker.terminated)).toBe(true)
   })
 
-  it('rejects pending frames and terminates both workers on cancellation', async () => {
+  it.each([2, 3, 4] as const)('rejects all pending frames and terminates %i workers on cancellation', async (workerCount) => {
     const controller = new AbortController()
-    const source = await createParallelFrameRenderer(data, controller.signal)
-    const first = source.renderFrame(0, 0, 0)
-    const second = source.renderFrame(1, 20, 20)
-    const firstRejected = expect(first).rejects.toThrow('Export cancelled')
-    const secondRejected = expect(second).rejects.toThrow('Export cancelled')
+    const source = await createParallelFrameRenderer(data, controller.signal, workerCount)
+    const rejected = Array.from({ length: workerCount }, (_, index) => expect(source.renderFrame(index, index * 20, index * 20)).rejects.toThrow('Export cancelled'))
     controller.abort()
-    await Promise.all([firstRejected, secondRejected])
+    await Promise.all(rejected)
     await source.close()
     expect(workers().every((worker) => worker.terminated)).toBe(true)
   })
 
-  it('propagates an unexpected worker failure to all pending frames', async () => {
-    const source = await createParallelFrameRenderer(data)
-    const first = source.renderFrame(0, 0, 0)
-    const second = source.renderFrame(1, 20, 20)
-    const firstRejected = expect(first).rejects.toThrow('worker failed')
-    const secondRejected = expect(second).rejects.toThrow('worker failed')
-    workers()[0].emit('error', new Error('worker failed'))
-    await Promise.all([firstRejected, secondRejected])
-    await source.close()
+  it.each([-1, 0, 1, 5, 4.5, Infinity, NaN])('rejects unsupported parallel worker count %s before allocating workers', async count => {
+    await expect(createParallelFrameRenderer(data, undefined, count as 2)).rejects.toThrow('two, three or four')
+    expect(workers()).toHaveLength(0)
   })
 
-  it.each(['cancel', 'close'] as const)('waits for both worker exits across repeated close calls after %s', async (action) => {
+  it.each([2, 3, 4] as const)('propagates a worker failure to all %i pending frames', async (workerCount) => {
+    const source = await createParallelFrameRenderer(data, undefined, workerCount)
+    const rejected = Array.from({ length: workerCount }, (_, index) => expect(source.renderFrame(index, index * 20, index * 20)).rejects.toThrow('worker failed'))
+    workers()[0].emit('error', new Error('worker failed'))
+    await Promise.all(rejected)
+    await source.close()
+    expect(workers().every(worker => worker.terminated && worker.terminationCalls === 1)).toBe(true)
+    await expect(source.renderFrame(workerCount, 60, 60)).rejects.toThrow('worker failed')
+  })
+
+  it.each([['cancel', 2], ['close', 2], ['cancel', 3], ['close', 3], ['cancel', 4], ['close', 4]] as const)('waits for every exit after %s with %i workers and repeated close calls', async (action, workerCount) => {
     const controller = new AbortController()
-    const source = await createParallelFrameRenderer(data, controller.signal)
+    const source = await createParallelFrameRenderer(data, controller.signal, workerCount)
     const finishTermination: Array<() => void> = []
     for (const worker of workers()) {
       worker.termination = new Promise<number>((resolve) => finishTermination.push(() => resolve(0)))
@@ -156,16 +155,16 @@ describe('parallel frame renderer', () => {
     const secondClose = source.close().then(() => completed.push('second'))
     await Promise.resolve()
     expect(completed).toEqual([])
-    expect(workers().map((worker) => worker.terminationCalls)).toEqual([1, 1])
+    expect(workers().map((worker) => worker.terminationCalls)).toEqual(Array(workerCount).fill(1))
 
-    finishTermination[0]()
+    for (let index = 0; index < workerCount - 1; index++) finishTermination[index]()
     await Promise.resolve()
     await Promise.resolve()
     expect(completed).toEqual([])
 
-    finishTermination[1]()
+    finishTermination[workerCount - 1]()
     await Promise.all([firstClose, secondClose])
     expect(completed).toEqual(['first', 'second'])
-    expect(workers().map((worker) => worker.terminationCalls)).toEqual([1, 1])
+    expect(workers().map((worker) => worker.terminationCalls)).toEqual(Array(workerCount).fill(1))
   })
 })
