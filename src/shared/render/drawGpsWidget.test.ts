@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Canvas2DLike } from './canvas2d'
-import { DEFAULT_GPS_STYLE, drawGpsWidget, effectiveGpsBounds } from './drawGpsWidget'
+import { buildColoredGpsTrackCache, DEFAULT_GPS_STYLE, drawGpsWidget, effectiveGpsBounds } from './drawGpsWidget'
 
 const FULL_TRACK_BOUNDS = { minX: -500, maxX: 500, minY: -300, maxY: 300 }
 const DOT_POSITION = { x: 120, y: -40 }
@@ -40,8 +40,8 @@ function mockCanvas(): Canvas2DLike {
     restore: noop,
     beginPath: noop,
     closePath: noop,
-    moveTo: noop,
-    lineTo: noop,
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
     quadraticCurveTo: noop,
     arc: vi.fn(),
     stroke: noop,
@@ -90,5 +90,27 @@ describe('drawGpsWidget live position', () => {
     const ctx = mockCanvas()
     drawGpsWidget(ctx, { ...baseOptions, showDot: false })
     expect(ctx.arc).not.toHaveBeenCalled()
+  })
+
+  it.each(['solid', 'speed', 'braking'] as const)('never draws a connector across a GPS break in %s mode', (colorMode) => {
+    const ctx = mockCanvas()
+    const options = { ...baseOptions, showDot: false,
+      trackPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 8, y: 8, breakBefore: true }, { x: 10, y: 10 }],
+      trackSpeeds: [5, 6, 7, 8], trackCts: [0, 1000, 200000, 201000], speedBounds: { min: 5, max: 8 },
+      style: { ...DEFAULT_GPS_STYLE, colorMode }
+    }
+    drawGpsWidget(ctx, options)
+    expect(ctx.moveTo).toHaveBeenCalledTimes(2)
+    expect(ctx.lineTo).toHaveBeenCalledTimes(2)
+    expect(ctx.arc).not.toHaveBeenCalled()
+
+    if (colorMode !== 'solid') {
+      const cached = mockCanvas()
+      buildColoredGpsTrackCache(cached, options.trackPoints, options.bounds, options.rect, options.style,
+        options.trackSpeeds, options.trackCts, options.speedBounds)
+      expect(cached.moveTo).toHaveBeenCalledTimes(2)
+      expect(cached.lineTo).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(cached.lineTo).mock.calls).toEqual(vi.mocked(ctx.lineTo).mock.calls)
+    }
   })
 })

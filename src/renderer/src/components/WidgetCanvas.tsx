@@ -12,6 +12,7 @@ import { detectAccelRuns, getAccelRunStateAt } from '@shared/telemetry/accelRuns
 import { buildManualCalibration, buildManualCalibrationForRoll } from '@shared/telemetry/imuCalibration'
 import { drawWidget } from '@shared/render/drawWidget'
 import { buildColoredGpsTrackCache } from '@shared/render/drawGpsWidget'
+import { prepareGpsTrackView, type GpsTrackView } from '@shared/render/gpsTrackView'
 import type { Canvas2DLike } from '@shared/render/canvas2d'
 import { speedSmoothingMsFor } from '@shared/widgets/helpers'
 import { useLoadedImage } from '../hooks/useLoadedImage'
@@ -98,6 +99,17 @@ function WidgetCanvas({
     [sampler, accelTargetSpeeds, accelStationaryThresholdMps, accelMinStationaryMs]
   )
 
+  const gpsTrimAware = widget.type === 'gpsTrack' && widget.style.trimAware
+  const preparedGpsTrack = useMemo<GpsTrackView>(() => {
+    const source = {
+      trackPoints: sampler.trackPoints,
+      bounds: sampler.bounds,
+      trackSpeeds: sampler.trackSpeeds,
+      trackCts: sampler.trackCts
+    }
+    return gpsTrimAware ? prepareGpsTrackView(source, trimStartMs, sessionEndMs) : source
+  }, [sampler, gpsTrimAware, trimStartMs, sessionEndMs])
+
   // colorMode 'speed'/'braking' segments never change frame-to-frame (only the dot does), so this
   // is pre-rendered once into an offscreen canvas and reused every frame instead of re-stroking
   // potentially tens of thousands of individual segments 60 times a second during playback -- see
@@ -119,16 +131,16 @@ function WidgetCanvas({
     cacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
     buildColoredGpsTrackCache(
       cacheCtx as unknown as Canvas2DLike,
-      sampler.trackPoints,
-      sampler.bounds,
+      preparedGpsTrack.trackPoints,
+      preparedGpsTrack.bounds,
       { x: 0, y: 0, w: pixelWidth, h: pixelHeight },
       gpsColorStyle,
-      sampler.trackSpeeds,
-      sampler.trackCts,
+      preparedGpsTrack.trackSpeeds,
+      preparedGpsTrack.trackCts,
       sampler.speedBounds
     )
     return cacheCanvas
-  }, [gpsColorStyle, pixelWidth, pixelHeight, sampler])
+  }, [gpsColorStyle, pixelWidth, pixelHeight, sampler, preparedGpsTrack])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -205,6 +217,7 @@ function WidgetCanvas({
       trackCts: sampler.trackCts,
       speedBounds: sampler.speedBounds,
       coloredTrackImage,
+      preparedGpsTrack,
       lapSpeedTraces,
       currentLapSpeedTrace,
       gForceReading,
@@ -236,6 +249,7 @@ function WidgetCanvas({
     headerImage,
     fastestLapIcon,
     coloredTrackImage,
+    preparedGpsTrack,
     lapSpeedTraces,
     currentLapSpeedTrace,
     accelRuns,

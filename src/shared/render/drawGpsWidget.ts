@@ -8,7 +8,19 @@ import { createRectFitTransform } from './layout'
  * turns when GPS sample spacing is coarse relative to the curve. Must be called between
  * ctx.beginPath() and ctx.stroke(). */
 function tracePath(ctx: Canvas2DLike, points: ProjectedPoint[]): void {
+  if (points.length === 0) return
+  let start = 0
+  for (let i = 1; i <= points.length; i++) {
+    if (i === points.length || points[i].breakBefore) {
+      traceContinuousPath(ctx, points.slice(start, i))
+      start = i
+    }
+  }
+}
+
+function traceContinuousPath(ctx: Canvas2DLike, points: ProjectedPoint[]): void {
   ctx.moveTo(points[0].x, points[0].y)
+  if (points.length === 1) return
   if (points.length === 2) {
     ctx.lineTo(points[1].x, points[1].y)
     return
@@ -150,6 +162,7 @@ export function drawColoredTrackSegments(
   ctx.lineJoin = 'round'
 
   for (let i = 0; i < screenPoints.length - 1; i++) {
+    if (screenPoints[i + 1].breakBefore) continue
     const color =
       style.colorMode === 'speed'
         ? speedSegmentColor(style, speedBounds, (trackSpeeds[i] + trackSpeeds[i + 1]) / 2)

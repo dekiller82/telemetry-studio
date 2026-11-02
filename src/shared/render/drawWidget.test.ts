@@ -71,6 +71,19 @@ function expectNoContentDrawn(ctx: Canvas2DLike): void {
 }
 
 describe('drawWidget GPS availability', () => {
+  it.each(['timer', 'sectorTimer'] as const)('hides live %s timing for an incomplete GPS lap', (type) => {
+    const ctx = mockCanvas()
+    const widget = createWidget(type)
+    if (widget.type === 'timer') widget.style.mode = 'laps'
+    const data = drawContext(true)
+    data.lapState = {
+      currentLapValid: false, lapNumber: 2, currentLapElapsedMs: 5000,
+      lastLapMs: 30000, bestLapMs: 30000, isNewBest: false, history: []
+    }
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    expectNoContentDrawn(ctx)
+  })
+
   it.each(['speedometerAnalog', 'speedometerDigital', 'elevation', 'distance', 'compass'] as const)(
     'hides %s while the current frame has no trustworthy GPS position',
     (type) => {

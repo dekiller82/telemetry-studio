@@ -182,6 +182,7 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
       })
       return
     case 'timer':
+      if (widget.style.mode === 'laps' && data.lapState?.currentLapValid === false) return
       drawTimer(ctx, {
         rect,
         style: widget.style,
@@ -193,6 +194,7 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
       })
       return
     case 'sectorTimer':
+      if (data.lapState?.currentLapValid === false) return
       drawSectorTimer(ctx, { rect, style: widget.style, sectorState: data.sectorState ?? null, fontFamily })
       return
     case 'deltaTime':

@@ -1,5 +1,6 @@
 import type { TelemetrySample } from '../types'
 import { distanceMeters } from './laps'
+import { isGpsRangeContinuous } from './gpsContinuity'
 
 export interface LapSectorTimes {
   lapNumber: number
@@ -59,6 +60,7 @@ function computeSectorBoundaries(samples: TelemetrySample[], crossings: number[]
     const isOutLap = lapIdx === 0
     const lapStartCts = isOutLap ? 0 : crossings[lapIdx - 1]
     const lapEndCts = crossings[lapIdx]
+    if (!isGpsRangeContinuous(samples, lapStartCts, lapEndCts)) continue
     const lapSamples = samples.filter((s) => s.cts >= lapStartCts && s.cts <= lapEndCts)
     if (lapSamples.length < 3) continue
 
@@ -103,31 +105,26 @@ export function computeLapSectors(samples: TelemetrySample[], crossings: number[
   return computeSectorBoundaries(samples, crossings)
 }
 
-/** Cheap, called every frame/frame-render: resolves current sector + elapsed and last/best sector times from precomputed boundaries. */
-export function getSectorStateAt(boundaries: SectorBoundary[], cts: number): SectorState {
-  let idx = -1
-  for (let i = 0; i < boundaries.length; i++) {
-    if (boundaries[i].lapStartCts <= cts) idx = i
+/** Resolves live clocks from crossings, and valid sector results from precomputed boundaries. */
+export function getSectorStateAt(boundaries: SectorBoundary[], cts: number, crossings?: readonly number[]): SectorState {
+  // Incomplete laps have no sector boundary entry, but their crossings still reset the live clock.
+  let lapStartCts = 0
+  for (const crossing of crossings ?? boundaries.flatMap((b) => [b.lapStartCts, b.lapEndCts])) {
+    if (crossing <= cts) lapStartCts = crossing
     else break
   }
+  const boundary = boundaries.find((b) => b.lapStartCts === lapStartCts && cts < b.lapEndCts)
 
   let currentSector: 1 | 2 | 3 = 1
-  let currentSectorElapsedMs = 0
+  // Preserve the standalone two-argument API's empty-state clock. Callers supplying crossings
+  // can still reset a live clock for a lap omitted because its GPS is incomplete.
+  let currentSectorElapsedMs = !crossings && boundaries.length === 0 ? 0 : Math.max(0, cts - lapStartCts)
   let currentLapS1Ms: number | null = null
   let currentLapS2Ms: number | null = null
 
-  if (idx >= 0) {
-    const b = boundaries[idx]
-    if (cts >= b.lapEndCts) {
-      // Past this boundary's known end -- we're in a NEW lap that hasn't closed yet, so its own
-      // total distance (and cut points) aren't known. Start fresh at sector 1 rather than
-      // continuing to measure "elapsed" from the PREVIOUS lap's own (unrelated) sector-2 cutoff,
-      // which would otherwise make the display drift from a stale baseline and look like sector 3
-      // "never ends" once a recording is cut mid-lap.
-      currentSector = 1
-      currentSectorElapsedMs = cts - b.lapEndCts
-    } else if (cts < b.s1Cts) {
-      currentSector = 1
+  if (boundary) {
+    const b = boundary
+    if (cts < b.s1Cts) {
       currentSectorElapsedMs = cts - b.lapStartCts
     } else if (cts < b.s2Cts) {
       currentSector = 2

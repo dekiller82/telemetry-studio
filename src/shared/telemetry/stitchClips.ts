@@ -39,7 +39,10 @@ export function stitchClipTelemetry(clips: ClipTelemetryInput[]): TelemetryData 
   let offsetMs = 0
   for (const clip of clips) {
     for (const sample of clip.telemetry.samples) {
-      samples.push({ ...sample, cts: sample.cts + offsetMs })
+      const cts = sample.cts + offsetMs
+      // GPS packet timing can extend a few milliseconds beyond a chapter's video duration.
+      // Do not introduce backwards/duplicate timestamps at the following chapter boundary.
+      if (!samples.length || cts > samples[samples.length - 1].cts) samples.push({ ...sample, cts })
     }
     offsetMs += clip.durationMs
   }
