@@ -1,4 +1,4 @@
-import type { CrossingAdjustments, CrossingIgnoreSet, LatLon, TelemetryData, WidgetInstance } from '../../shared/types'
+import type { CrossingAdjustments, CrossingIgnoreSet, LapExclusionSet, LatLon, SectorTimingSettings, TelemetryData, WidgetInstance } from '../../shared/types'
 
 export interface FrameWorkerData {
   width: number
@@ -7,6 +7,8 @@ export interface FrameWorkerData {
   telemetry: TelemetryData
   startFinish: LatLon | null
   startFinishRadiusM: number
+  sectorTiming?: SectorTimingSettings
+  excludedLaps?: LapExclusionSet
   crossingAdjustmentsMs: CrossingAdjustments
   ignoredCrossings: CrossingIgnoreSet
   trimStartMs: number

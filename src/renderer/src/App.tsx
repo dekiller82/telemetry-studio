@@ -7,7 +7,7 @@ import ToolbarMenu from './components/ToolbarMenu'
 import { useProjectStore } from './store/projectStore'
 import { useWidgetStore } from './store/widgetStore'
 import { useFontStore } from './store/fontStore'
-import { detectLapCrossings, fastestLapRange } from '@shared/telemetry/laps'
+import { detectLapTiming, fastestLapRange } from '@shared/telemetry/laps'
 import { formatTime } from '@shared/format'
 import { DELIVERY_PRESETS, SOURCE_QUALITY_PRESET_ID, findDeliveryPreset } from '@shared/export/deliveryPresets'
 import type { ImportProgress, ProjectPayload, RecentProject, UpdateCheckResult } from '@shared/types'
@@ -118,6 +118,10 @@ function App(): React.JSX.Element {
   const setStartFinish = useProjectStore((s) => s.setStartFinish)
   const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
   const setStartFinishRadiusM = useProjectStore((s) => s.setStartFinishRadiusM)
+  const sectorTiming = useProjectStore((s) => s.sectorTiming)
+  const setSectorTiming = useProjectStore((s) => s.setSectorTiming)
+  const excludedLaps = useProjectStore((s) => s.excludedLaps)
+  const setExcludedLaps = useProjectStore((s) => s.setExcludedLaps)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
   const setCrossingAdjustmentsMs = useProjectStore((s) => s.setCrossingAdjustmentsMs)
   const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
@@ -310,6 +314,10 @@ function App(): React.JSX.Element {
     widgets,
     startFinish,
     startFinishRadiusM,
+
+    sectorTiming,
+
+    excludedLaps,
     crossingAdjustmentsMs,
     ignoredCrossings,
     trimStartMs,
@@ -321,6 +329,10 @@ function App(): React.JSX.Element {
     widgets,
     startFinish,
     startFinishRadiusM,
+
+    sectorTiming,
+
+    excludedLaps,
     crossingAdjustmentsMs,
     ignoredCrossings,
     trimStartMs,
@@ -408,6 +420,10 @@ function App(): React.JSX.Element {
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
       setStartFinishRadiusM(project.startFinishRadiusM)
+
+      setSectorTiming(project.sectorTiming ?? { s1: null, s2: null })
+
+      setExcludedLaps(project.excludedLaps ?? {})
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
       setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
@@ -431,6 +447,10 @@ function App(): React.JSX.Element {
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
       setStartFinishRadiusM(project.startFinishRadiusM)
+
+      setSectorTiming(project.sectorTiming ?? { s1: null, s2: null })
+
+      setExcludedLaps(project.excludedLaps ?? {})
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
       setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
@@ -458,6 +478,10 @@ function App(): React.JSX.Element {
       loadWidgets(project.widgets)
       setStartFinish(project.startFinish)
       setStartFinishRadiusM(project.startFinishRadiusM)
+
+      setSectorTiming(project.sectorTiming ?? { s1: null, s2: null })
+
+      setExcludedLaps(project.excludedLaps ?? {})
       setCrossingAdjustmentsMs(project.crossingAdjustmentsMs)
       setIgnoredCrossings(project.ignoredCrossings)
       setTrim(project.trimStartMs, project.trimEndMs)
@@ -485,6 +509,10 @@ function App(): React.JSX.Element {
         widgets,
         startFinish,
         startFinishRadiusM,
+
+        sectorTiming,
+
+        excludedLaps,
         crossingAdjustmentsMs,
         ignoredCrossings,
         trimStartMs,
@@ -510,7 +538,7 @@ function App(): React.JSX.Element {
     setCancelRequested(false)
     try {
       const path = await window.api.exportVideo(
-        { imported, widgets, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, trimStartMs, trimEndMs, defaultFontFamily },
+        { imported, widgets, startFinish, startFinishRadiusM, sectorTiming, excludedLaps, crossingAdjustmentsMs, ignoredCrossings, trimStartMs, trimEndMs, defaultFontFamily },
         exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId
       )
       if (wasCancelledRef.current) return
@@ -531,11 +559,9 @@ function App(): React.JSX.Element {
   // TelemetrySampler), recomputed only when the telemetry/start-finish point actually change.
   const fastestLap = useMemo(() => {
     if (!imported || !startFinish) return null
-    return fastestLapRange(
-      detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings),
-      imported.telemetry.samples
-    )
-  }, [imported, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings])
+    const detected = detectLapTiming(imported.telemetry.samples, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps)
+    return fastestLapRange(detected.crossings, imported.telemetry.samples, detected.excludedLapNumbers)
+  }, [imported, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps])
 
   const [showBestLapExportForm, setShowBestLapExportForm] = useState(false)
   const [bestLapPaddingBeforeSec, setBestLapPaddingBeforeSec] = useState(5)
@@ -562,6 +588,10 @@ function App(): React.JSX.Element {
           widgets,
           startFinish,
           startFinishRadiusM,
+
+          sectorTiming,
+
+          excludedLaps,
           crossingAdjustmentsMs,
           ignoredCrossings,
           trimStartMs: clipTrimStartMs,

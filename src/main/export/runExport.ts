@@ -2,7 +2,7 @@ import { spawn, type ChildProcessByStdio } from 'child_process'
 import { performance } from 'node:perf_hooks'
 import type { Readable, Writable } from 'node:stream'
 import ffmpegPathRaw from 'ffmpeg-static'
-import type { ClipInfo, CrossingAdjustments, CrossingIgnoreSet, LatLon, TelemetryData, WidgetInstance } from '../../shared/types'
+import type { ClipInfo, CrossingAdjustments, CrossingIgnoreSet, LapExclusionSet, LatLon, SectorTimingSettings, TelemetryData, WidgetInstance } from '../../shared/types'
 import type { TelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { createFrameRenderer } from './frameRenderer'
 import { selectVideoEncoder, CPU_ENCODER, type VideoEncoder } from './gpuEncoder'
@@ -51,6 +51,8 @@ export interface RunExportOptions {
   startFinish: LatLon | null
   /** Start/finish detection radius, meters -- see shared/types.ts's ProjectPayload.startFinishRadiusM. */
   startFinishRadiusM: number
+  sectorTiming?: SectorTimingSettings
+  excludedLaps?: LapExclusionSet
   /** Manual per-crossing time corrections for startFinish -- see shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: CrossingAdjustments
   /** Crossings manually deleted as a false lap detection -- see shared/types.ts's CrossingIgnoreSet. */
@@ -626,6 +628,8 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     telemetry,
     startFinish,
     startFinishRadiusM,
+    sectorTiming,
+    excludedLaps,
     crossingAdjustmentsMs,
     ignoredCrossings,
     trimStartMs,
@@ -684,6 +688,8 @@ export async function runExport(options: RunExportOptions): Promise<void> {
           telemetry: telemetry!,
           startFinish,
           startFinishRadiusM,
+          sectorTiming,
+          excludedLaps,
           crossingAdjustmentsMs,
           ignoredCrossings,
           trimStartMs,
@@ -708,7 +714,10 @@ export async function runExport(options: RunExportOptions): Promise<void> {
       ignoredCrossings,
       trimEndMs,
       trimStartMs,
-      defaultFontFamily
+      defaultFontFamily,
+      undefined,
+      sectorTiming,
+      excludedLaps
     )
     return {
       roi: renderer.roi,

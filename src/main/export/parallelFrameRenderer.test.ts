@@ -83,12 +83,15 @@ beforeEach(() => {
 
 describe('parallel frame renderer', () => {
   it('forwards the same lap detection radius and deleted crossings to both workers', async () => {
-    const configured = { ...data, startFinishRadiusM: 6, ignoredCrossings: { '1': true }, crossingAdjustmentsMs: { '2': 40 } }
+  const configured = { ...data, startFinishRadiusM: 6, ignoredCrossings: { '1': true }, crossingAdjustmentsMs: { '2': 40 },
+    sectorTiming: { s1: { lat: 30.001, lon: 106.001 }, s2: { lat: 30.002, lon: 106.002 } }, excludedLaps: { '1000:61000': true } }
     const source = await createParallelFrameRenderer(configured)
     for (const worker of workers()) {
       expect(worker.workerData.startFinishRadiusM).toBe(6)
       expect(worker.workerData.ignoredCrossings).toEqual({ '1': true })
       expect(worker.workerData.crossingAdjustmentsMs).toEqual({ '2': 40 })
+      expect(worker.workerData.sectorTiming).toEqual(configured.sectorTiming)
+      expect(worker.workerData.excludedLaps).toEqual(configured.excludedLaps)
     }
     await source.close()
   })

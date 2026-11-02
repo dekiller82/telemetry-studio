@@ -78,6 +78,37 @@ function continuousGpsTrack(startCts: number, count: number, startNorthM = 0, st
 describe('project persistence', () => {
   const dirs: string[] = []
 
+  it('saves manual result decisions separately from deleted crossings and defaults older projects to no exclusions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-lap-results-'))
+    dirs.push(dir)
+    const payload = makePayload(dir, 1, { '0': 40 })
+    payload.excludedLaps = { '1000:61000': true }
+    const file = join(dir, 'results.gpo')
+    await saveProjectToFile(file, payload)
+    const loaded = await loadProjectFromFile(file)
+    expect(loaded.excludedLaps).toEqual(payload.excludedLaps)
+    expect(loaded.crossingAdjustmentsMs).toEqual({ '0': 40 })
+    expect(loaded.ignoredCrossings).toEqual({})
+    const older = JSON.parse(readFileSync(file, 'utf8'))
+    delete older.excludedLaps
+    writeFileSync(file, JSON.stringify(older))
+    expect((await loadProjectFromFile(file)).excludedLaps).toEqual({})
+  })
+
+  it('round-trips fixed sector coordinates and defaults older projects to automatic gates', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-sectors-'))
+    dirs.push(dir)
+    const payload = makePayload(dir)
+    payload.sectorTiming = { s1: { lat: 30.0001, lon: 106.0002 }, s2: { lat: 30.0003, lon: 106.0004 } }
+    const file = join(dir, 'sectors.gpo')
+    await saveProjectToFile(file, payload)
+    expect((await loadProjectFromFile(file)).sectorTiming).toEqual(payload.sectorTiming)
+    const older = JSON.parse(readFileSync(file, 'utf8'))
+    delete older.sectorTiming
+    writeFileSync(file, JSON.stringify(older))
+    expect((await loadProjectFromFile(file)).sectorTiming).toEqual({ s1: null, s2: null })
+  })
+
   afterEach(() => {
     dirs.length = 0
   })

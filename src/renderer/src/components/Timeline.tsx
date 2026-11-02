@@ -2,6 +2,7 @@ import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { formatTime } from '@shared/format'
 import { clipIndexAtGlobalMs } from '@shared/timeline/clipTiming'
 import { detectLapCrossingsDetailed, fastestLapRange, lapTimesFromCrossings } from '@shared/telemetry/laps'
+import { selectableLaps, excludedLapNumbers } from '@shared/telemetry/lapSelection'
 import type { TelemetrySampler } from '@shared/telemetry/sampleAt'
 import { useProjectStore } from '../store/projectStore'
 import { useWidgetStore } from '../store/widgetStore'
@@ -32,6 +33,10 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
   const resetCrossingAdjustment = useProjectStore((s) => s.resetCrossingAdjustment)
   const ignoreCrossing = useProjectStore((s) => s.ignoreCrossing)
   const restoreCrossing = useProjectStore((s) => s.restoreCrossing)
+  const exclusions = useProjectStore((s) => s.excludedLaps)
+  const setLapExcluded = useProjectStore((s) => s.setLapExcluded)
+  const isExporting = useProjectStore((s) => s.isExporting)
+  const [showLapResults, setShowLapResults] = useState(false)
   const widgetSelectedIds = useWidgetStore((s) => s.selectedIds)
 
   // EVERY detected crossing (including manually-deleted ones, so their timeline marker can still
@@ -59,6 +64,8 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
 
   // What lapTimes/fastestLap/the "Fastest lap" button actually want: just the real crossings' cts.
   const crossings = useMemo(() => detailedCrossings.filter((c) => !c.ignored).map((c) => c.cts), [detailedCrossings])
+  const laps = useMemo(() => selectableLaps(detailedCrossings, exclusions), [detailedCrossings, exclusions])
+  const excludedNumbers = useMemo(() => excludedLapNumbers(detailedCrossings, exclusions), [detailedCrossings, exclusions])
 
   // Which crossing (by its stable rawIndex) the nudge/delete control below is currently showing --
   // selected by clicking its timeline marker. Cleared whenever the crossing list itself changes
@@ -80,7 +87,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
     [imported]
   )
 
-  const fastestLap = useMemo(() => fastestLapRange(crossings, sampler?.samples), [crossings, sampler])
+  const fastestLap = useMemo(() => fastestLapRange(crossings, sampler?.samples, excludedNumbers), [crossings, sampler, excludedNumbers])
   // One entry per COMPLETED lap, index-aligned with crossings.slice(1) -- lapTimes[i] is the
   // duration of the lap that just finished at crossings[i + 1].
   const lapTimes = useMemo(() => lapTimesFromCrossings(crossings, sampler?.samples), [crossings, sampler])
@@ -357,6 +364,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
 
   const selectedCrossing = selectedRawIndex !== null ? crossingsForDisplay.find((c) => c.rawIndex === selectedRawIndex) ?? null : null
   const selectedCrossingCts = selectedCrossing?.cts
+  const selectedLap = selectedCrossing && !selectedCrossing.ignored ? laps[selectedCrossing.lapNumber - 1] : undefined
   const selectedFrameMs = selectedCrossingCts !== undefined ? frameDurationMsAt(selectedCrossingCts) : 0
   const selectedAdjustmentMs = selectedRawIndex !== null ? crossingAdjustmentsMs[String(selectedRawIndex)] ?? 0 : 0
   const selectedAdjustmentFrames = selectedFrameMs > 0 ? Math.round(selectedAdjustmentMs / selectedFrameMs) : 0
@@ -403,6 +411,10 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       >
         🏁 Fastest lap
       </button>
+      <button className="timeline__fastest-lap" onClick={() => setShowLapResults((open) => !open)}
+        aria-expanded={showLapResults} aria-controls="lap-results-editor" disabled={!laps.length}>
+        Lap results{excludedNumbers.size > 0 ? ` (${excludedNumbers.size} excluded)` : ''}
+      </button>
       <div className="timeline__track" ref={trackRef} onMouseDown={handlePlayheadMouseDown}>
         <div className="timeline__fill" style={{ width: `${pct}%` }} />
         {trimStartPct > 0 && <div className="timeline__trim-mask timeline__trim-mask--start" style={{ width: `${trimStartPct}%` }} />}
@@ -413,6 +425,8 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
           const clipPct = totalDurationMs ? (clip.startOffsetMs / totalDurationMs) * 100 : 0
           return <div key={clip.startOffsetMs} className="timeline__clip-marker" style={{ left: `${clipPct}%` }} />
         })}
+        {laps.filter((lap) => lap.excluded).map((lap) => <div key={lap.key} className="timeline__excluded-lap"
+          style={{ left: `${lap.startCts / totalDurationMs * 100}%`, width: `${(lap.endCts - lap.startCts) / totalDurationMs * 100}%` }} />)}
         {crossingsForDisplay.map(({ cts, rawIndex, ignored, lapNumber }) => {
           const lapPct = totalDurationMs ? (cts / totalDurationMs) * 100 : 0
           const precedingLapTime = !ignored && lapNumber > 1 ? lapTimes[lapNumber - 2] : null
@@ -420,7 +434,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
           return (
             <div
               key={rawIndex}
-              className={`timeline__lap-marker${rawIndex === selectedRawIndex ? ' timeline__lap-marker--selected' : ''}${isAdjusted ? ' timeline__lap-marker--adjusted' : ''}${ignored ? ' timeline__lap-marker--ignored' : ''}`}
+              className={`timeline__lap-marker${rawIndex === selectedRawIndex ? ' timeline__lap-marker--selected' : ''}${isAdjusted ? ' timeline__lap-marker--adjusted' : ''}${ignored ? ' timeline__lap-marker--ignored' : ''}${!ignored && excludedNumbers.has(lapNumber) ? ' timeline__lap-marker--excluded' : ''}`}
               style={{ left: `${lapPct}%` }}
               onMouseDown={(e) => {
                 e.preventDefault()
@@ -430,10 +444,10 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
               }}
               title={
                 ignored
-                  ? 'Deleted lap (false detection) -- click to restore'
+                  ? 'Deleted crossing (false detection) -- click to restore'
                   : (precedingLapTime !== null
                       ? `Lap ${lapNumber} start (Lap ${lapNumber - 1} was ${formatTime(precedingLapTime, true)})`
-                      : `Lap ${lapNumber} start`) + (isAdjusted ? ' -- manually adjusted, click to fine-tune' : ' -- click to fine-tune')
+                      : `Lap ${lapNumber} start`) + (excludedNumbers.has(lapNumber) ? ' -- lap excluded from results' : '') + (isAdjusted ? ' -- manually adjusted, click to fine-tune' : ' -- click to fine-tune')
               }
             />
           )
@@ -454,12 +468,26 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       </div>
       <span className="timeline__time timeline__time--dim">{formatTime(totalDurationMs, true)}</span>
     </div>
+    {showLapResults && <section id="lap-results-editor" className="timeline-lap-results" aria-label="Manual lap results">
+      <p>Uncheck a lap to exclude its result, or check it to restore it. Crossings and lap numbers stay in place.
+        GPS gaps still limit which times can be calculated.</p>
+      <div className="timeline-lap-results__list">
+        {laps.map((lap) => <div key={lap.key} className={`timeline-lap-results__row${lap.excluded ? ' timeline-lap-results__row--excluded' : ''}`}>
+          <button className="timeline-nudge__button" onClick={() => jumpToLapStart(lap.startCts)} title={`Jump to lap ${lap.lapNumber} start`}>Lap {lap.lapNumber}</button>
+          <span>{formatTime(lap.startCts, true)} – {formatTime(lap.endCts, true)}</span>
+          <span>{formatTime(lap.endCts - lap.startCts, true)}</span>
+          <label><input type="checkbox" checked={!lap.excluded} disabled={isExporting}
+            aria-label={`Count lap ${lap.lapNumber} result`} onChange={(e) => setLapExcluded(lap.key, !e.target.checked)} /> Count result</label>
+          <span>{lap.excluded ? 'Manually excluded' : lapTimes[lap.lapNumber - 1] === null ? 'GPS incomplete' : 'Counted'}</span>
+        </div>)}
+      </div>
+    </section>}
     {selectedRawIndex !== null && selectedCrossing && selectedCrossingCts !== undefined && (
       <div className="timeline-nudge">
         {selectedCrossing.ignored ? (
           <>
             <span className="timeline-nudge__label">
-              This lap was deleted as a false detection -- it's excluded from lap timing and every lap-based widget.
+              This crossing was deleted as a false detection. Adjacent lap intervals are merged until it is restored.
             </span>
             <button
               className="timeline-nudge__button"
@@ -510,14 +538,22 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
               Reset
             </button>
             <button
+              className="timeline-nudge__button"
+              disabled={!selectedLap || isExporting}
+              onClick={() => selectedLap && setLapExcluded(selectedLap.key, !selectedLap.excluded)}
+              title="Keep this lap and its crossings, but choose whether its result counts. A closing crossing is required."
+            >
+              {selectedLap?.excluded ? `Restore lap ${selectedCrossing.lapNumber} result` : `Exclude lap ${selectedCrossing.lapNumber} result`}
+            </button>
+            <button
               className="timeline-nudge__button timeline-nudge__button--delete"
               onClick={() => {
                 ignoreCrossing(selectedRawIndex)
                 setSelectedRawIndex(null)
               }}
-              title="Delete this lap -- a false detection, e.g. the track passing close to the line somewhere that isn't the actual line"
+              title="Remove a false crossing and merge its adjacent intervals. To keep a real lap, use Exclude result instead."
             >
-              Delete lap
+              Delete crossing
             </button>
           </>
         )}

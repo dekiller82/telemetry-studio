@@ -1,4 +1,5 @@
-import type { TelemetrySample, LatLon, CrossingAdjustments, CrossingIgnoreSet } from '../types'
+import type { TelemetrySample, LatLon, CrossingAdjustments, CrossingIgnoreSet, LapExclusionSet } from '../types'
+import { excludedLapNumbers as resolveExclusions } from './lapSelection'
 import { findBracketIndex } from './interpolate'
 import { canConnectGpsSamples, distanceMeters, isGpsRangeContinuous } from './gpsContinuity'
 export { distanceMeters } from './gpsContinuity'
@@ -15,6 +16,8 @@ export interface LapHistoryEntry {
 }
 
 export interface LapState {
+  /** Manual results decision, separate from whether the GPS can be calculated. */
+  currentLapExcluded?: boolean
   /** False when a gap/jump makes the current automatic lap incomplete. */
   currentLapValid?: boolean
   /** 1-indexed, the lap currently in progress at the queried time. Setting the start/finish point
@@ -102,6 +105,8 @@ export function legacyLapCrossingsForMigration(samples: TelemetrySample[], start
 }
 
 export interface DetectedCrossing {
+  /** Original source timestamp, unchanged by manual frame nudges. */
+  rawCts: number
   /** Nudge-adjusted video time, ms (see CrossingAdjustments). */
   cts: number
   /** Stable identity for this crossing: its index in the RAW, unadjusted detection order. This is
@@ -128,7 +133,7 @@ export function detectLapCrossingsDetailed(
 ): DetectedCrossing[] {
   const raw = detectRawLapCrossings(samples, startFinish, thresholdMeters, minLapMs)
   const adjusted = applyCrossingAdjustments(raw, adjustments)
-  return adjusted.map((cts, rawIndex) => ({ cts, rawIndex, ignored: Boolean(ignoredCrossings[String(rawIndex)]) }))
+  return adjusted.map((cts, rawIndex) => ({ cts, rawCts: raw[rawIndex], rawIndex, ignored: Boolean(ignoredCrossings[String(rawIndex)]) }))
 }
 
 /**
@@ -151,11 +156,11 @@ export function detectLapCrossings(
 
 /** Lap durations between consecutive crossings; the out-lap before the first crossing is excluded. */
 export function lapTimesFromCrossings(crossings: number[]): number[]
-export function lapTimesFromCrossings(crossings: number[], samples: TelemetrySample[] | undefined): (number | null)[]
-export function lapTimesFromCrossings(crossings: number[], samples?: TelemetrySample[]): (number | null)[] {
+export function lapTimesFromCrossings(crossings: number[], samples: TelemetrySample[] | undefined, excluded?: ReadonlySet<number>): (number | null)[]
+export function lapTimesFromCrossings(crossings: number[], samples?: TelemetrySample[], excluded?: ReadonlySet<number>): (number | null)[] {
   const laps: (number | null)[] = []
   for (let i = 1; i < crossings.length; i++) {
-    laps.push(!samples || isGpsRangeContinuous(samples, crossings[i - 1], crossings[i])
+    laps.push(!excluded?.has(i) && (!samples || isGpsRangeContinuous(samples, crossings[i - 1], crossings[i]))
       ? crossings[i] - crossings[i - 1] : null)
   }
   return laps
@@ -167,7 +172,7 @@ export function lapTimesFromCrossings(crossings: number[], samples?: TelemetrySa
  * scrubbing to the line and marking it) starts Lap 1, not Lap 2 -- there is no separate untimed
  * "out lap" before it.
  */
-export function getLapStateAt(crossings: number[], cts: number, samples?: TelemetrySample[]): LapState {
+export function getLapStateAt(crossings: number[], cts: number, samples?: TelemetrySample[], excluded?: ReadonlySet<number>): LapState {
   let idx = -1
   for (let i = 0; i < crossings.length; i++) {
     if (crossings[i] <= cts) idx = i
@@ -177,7 +182,7 @@ export function getLapStateAt(crossings: number[], cts: number, samples?: Teleme
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
   // Only laps completed by `cts` count -- using the full crossings array here would leak future
   // laps into "best"/"last"/history while scrubbing earlier in the video than they occurred.
-  const lapTimes = lapTimesFromCrossings(crossings.slice(0, idx + 1), samples)
+  const lapTimes = lapTimesFromCrossings(crossings.slice(0, idx + 1), samples, excluded)
   const validTimes = lapTimes.filter((time): time is number => time !== null)
 
   const bestLapMs = validTimes.length > 0 ? Math.min(...validTimes) : null
@@ -191,6 +196,7 @@ export function getLapStateAt(crossings: number[], cts: number, samples?: Teleme
   }
 
   return {
+    currentLapExcluded: idx >= 0 && excluded?.has(idx + 1) === true,
     currentLapValid: !samples || isGpsRangeContinuous(samples, lapStartCts, cts),
     lapNumber: Math.max(1, idx + 1),
     currentLapElapsedMs: Math.max(0, cts - lapStartCts),
@@ -212,8 +218,8 @@ export interface LapRange {
  *  -- unlike getLapStateAt's bestLapMs, this is meant for one-shot actions like "jump to it" or
  *  "export it", which should always target the session's real best lap regardless of where the
  *  video happens to be scrubbed to right now). Null if fewer than one full lap exists. */
-export function fastestLapRange(crossings: number[], samples?: TelemetrySample[]): LapRange | null {
-  const lapTimes = lapTimesFromCrossings(crossings, samples)
+export function fastestLapRange(crossings: number[], samples?: TelemetrySample[], excluded?: ReadonlySet<number>): LapRange | null {
+  const lapTimes = lapTimesFromCrossings(crossings, samples, excluded)
   if (lapTimes.length === 0) return null
 
   let bestIndex = -1
@@ -229,4 +235,13 @@ export function fastestLapRange(crossings: number[], samples?: TelemetrySample[]
     endCts: crossings[bestIndex + 1],
     timeMs: lapTimes[bestIndex]!
   }
+}
+
+/** One detection snapshot for results consumers in the editor, export and Workers. */
+export function detectLapTiming(
+  samples: TelemetrySample[], startFinish: LatLon, thresholdMeters = DEFAULT_THRESHOLD_METERS,
+  adjustments: CrossingAdjustments = {}, ignored: CrossingIgnoreSet = {}, exclusions: LapExclusionSet = {}
+): { crossings: number[]; excludedLapNumbers: ReadonlySet<number> } {
+  const detailed = detectLapCrossingsDetailed(samples, startFinish, thresholdMeters, undefined, adjustments, ignored)
+  return { crossings: detailed.filter((c) => !c.ignored).map((c) => c.cts), excludedLapNumbers: resolveExclusions(detailed, exclusions) }
 }

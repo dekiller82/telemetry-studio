@@ -176,6 +176,8 @@ export function registerIpcHandlers(): void {
         sampler,
         telemetry: payload.imported.telemetry,
         startFinish: payload.startFinish,
+        sectorTiming: payload.sectorTiming,
+        excludedLaps: payload.excludedLaps,
         startFinishRadiusM: payload.startFinishRadiusM,
         crossingAdjustmentsMs: payload.crossingAdjustmentsMs,
         ignoredCrossings: payload.ignoredCrossings,

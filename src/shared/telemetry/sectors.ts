@@ -11,6 +11,9 @@ export interface LapSectorTimes {
 }
 
 export interface SectorState {
+  currentLapExcluded?: boolean
+  /** Immutable source timeline for the optional broadcast layout. */
+  broadcast?: import('./broadcastSectors').BroadcastTimingContext
   currentSector: 1 | 2 | 3
   currentSectorElapsedMs: number
   /** The CURRENT (possibly still in-progress) lap's own S1 time -- available as soon as sector 2
@@ -32,6 +35,10 @@ export interface SectorState {
 }
 
 export interface SectorBoundary {
+  /** Missing on older standalone boundaries; false when a full circuit cannot be compared. */
+  complete?: boolean
+  validUntilCts?: number
+  excluded?: boolean
   lapNumber: number
   /** The "out lap" (video start to the first crossing) has a real, known end time (the first
    *  crossing) so it CAN be sector-divided like any other lap for live current-sector display --
@@ -108,16 +115,15 @@ export function computeLapSectors(samples: TelemetrySample[], crossings: number[
 /** Resolves live clocks from crossings, and valid sector results from precomputed boundaries. */
 export function getSectorStateAt(boundaries: SectorBoundary[], cts: number, crossings?: readonly number[]): SectorState {
   // Incomplete laps have no sector boundary entry, but their crossings still reset the live clock.
+  const resolvedCrossings = crossings ?? boundaries.flatMap((b) => [b.lapStartCts, b.lapEndCts])
   let lapStartCts = 0
-  for (const crossing of crossings ?? boundaries.flatMap((b) => [b.lapStartCts, b.lapEndCts])) {
+  for (const crossing of resolvedCrossings) {
     if (crossing <= cts) lapStartCts = crossing
     else break
   }
   const boundary = boundaries.find((b) => b.lapStartCts === lapStartCts && cts < b.lapEndCts)
 
   let currentSector: 1 | 2 | 3 = 1
-  // Preserve the standalone two-argument API's empty-state clock. Callers supplying crossings
-  // can still reset a live clock for a lap omitted because its GPS is incomplete.
   let currentSectorElapsedMs = !crossings && boundaries.length === 0 ? 0 : Math.max(0, cts - lapStartCts)
   let currentLapS1Ms: number | null = null
   let currentLapS2Ms: number | null = null
@@ -141,7 +147,7 @@ export function getSectorStateAt(boundaries: SectorBoundary[], cts: number, cros
   // Only genuine timed laps (not the out-lap) that fully finished at/before cts count toward
   // last-lap/bests, so scrubbing earlier in the video never leaks a future lap's sector times in,
   // and the untimed out-lap never counts as a real lap time (mirrors lapTimesFromCrossings).
-  const completed = boundaries.filter((b) => !b.isOutLap && b.lapEndCts <= cts).map(sectorTimesFromBoundary)
+  const completed = boundaries.filter((b) => !b.isOutLap && !b.excluded && b.complete !== false && b.lapEndCts <= cts).map(sectorTimesFromBoundary)
   const lastLap = completed.length > 0 ? completed[completed.length - 1] : null
 
   // "Best" includes the current (still in-progress) lap's own already-completed sectors too --
@@ -150,20 +156,22 @@ export function getSectorStateAt(boundaries: SectorBoundary[], cts: number, cros
   const completedS1 = completed.map((l) => l.s1Ms)
   const completedS2 = completed.map((l) => l.s2Ms)
   const completedS3 = completed.map((l) => l.s3Ms)
-  const allS1 = currentLapS1Ms !== null ? [...completedS1, currentLapS1Ms] : completedS1
-  const allS2 = currentLapS2Ms !== null ? [...completedS2, currentLapS2Ms] : completedS2
+  const allS1 = currentLapS1Ms !== null && !boundary?.excluded ? [...completedS1, currentLapS1Ms] : completedS1
+  const allS2 = currentLapS2Ms !== null && !boundary?.excluded ? [...completedS2, currentLapS2Ms] : completedS2
 
   const bestS1Ms = allS1.length ? Math.min(...allS1) : null
   const bestS2Ms = allS2.length ? Math.min(...allS2) : null
   const bestS3Ms = completedS3.length ? Math.min(...completedS3) : null
 
   return {
+    currentLapExcluded: boundary?.excluded === true,
     currentSector,
+    broadcast: { cts, boundaries, crossings: resolvedCrossings },
     currentSectorElapsedMs,
     currentLapS1Ms,
-    isCurrentLapS1Best: currentLapS1Ms !== null && bestS1Ms !== null && currentLapS1Ms === bestS1Ms,
+    isCurrentLapS1Best: !boundary?.excluded && currentLapS1Ms !== null && bestS1Ms !== null && currentLapS1Ms === bestS1Ms,
     currentLapS2Ms,
-    isCurrentLapS2Best: currentLapS2Ms !== null && bestS2Ms !== null && currentLapS2Ms === bestS2Ms,
+    isCurrentLapS2Best: !boundary?.excluded && currentLapS2Ms !== null && bestS2Ms !== null && currentLapS2Ms === bestS2Ms,
     lastLap,
     bestS1Ms,
     bestS2Ms,

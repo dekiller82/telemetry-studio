@@ -32,10 +32,53 @@ function imported(path: string, durationMs: number, clipCount = 1): ImportResult
 }
 
 beforeEach(() => {
-  useProjectStore.setState({ imported: null, projectGeneration: 0, currentTimeMs: 0, trimStartMs: 0, trimEndMs: 0 })
+  useProjectStore.setState({ imported: null, projectGeneration: 0, currentTimeMs: 0, trimStartMs: 0, trimEndMs: 0, excludedLaps: {} })
+})
+
+describe('manual lap results', () => {
+  it('restores one result without changing crossings or other manual decisions', () => {
+    const store = useProjectStore.getState()
+    store.setImported(imported('first.mp4', 200_000))
+    store.setCrossingAdjustmentsMs({ '1': 40 })
+    store.setIgnoredCrossings({ '4': true })
+    store.setLapExcluded('1000:61000', true)
+    store.setLapExcluded('61000:111000', true)
+    store.setLapExcluded('1000:61000', false)
+    expect(useProjectStore.getState().excludedLaps).toEqual({ '61000:111000': true })
+    expect(useProjectStore.getState().crossingAdjustmentsMs).toEqual({ '1': 40 })
+    expect(useProjectStore.getState().ignoredCrossings).toEqual({ '4': true })
+  })
+  it('keeps decisions when appending clips and resets them for a new project', () => {
+    const store = useProjectStore.getState()
+    store.setImported(imported('first.mp4', 100_000))
+    store.setLapExcluded('1000:61000', true)
+    store.updateImportedClips(imported('first.mp4', 200_000, 2))
+    expect(useProjectStore.getState().excludedLaps).toEqual({ '1000:61000': true })
+    store.setImported(imported('new.mp4', 100_000))
+    expect(useProjectStore.getState().excludedLaps).toEqual({})
+  })
+  it.each(['point', 'radius'])('clears decisions when the start/finish %s changes', (setting) => {
+    const store = useProjectStore.getState()
+    store.setLapExcluded('1000:61000', true)
+    if (setting === 'point') store.setStartFinish({ lat: 30, lon: 106 })
+    else store.setStartFinishRadiusM(6)
+    expect(useProjectStore.getState().excludedLaps).toEqual({})
+    store.setExcludedLaps({ '2000:62000': true })
+    expect(useProjectStore.getState().excludedLaps).toEqual({ '2000:62000': true })
+  })
 })
 
 describe('project replacement generation', () => {
+  it('retains fixed sector markers when appending chapters and clears them for a new project', () => {
+    const store = useProjectStore.getState()
+    store.setImported(imported('first.mp4', 1_000))
+    const markers = { s1: { lat: 30.001, lon: 106.001 }, s2: { lat: 30.002, lon: 106.002 } }
+    store.setSectorTiming(markers)
+    store.updateImportedClips(imported('first.mp4', 2_000, 2))
+    expect(useProjectStore.getState().sectorTiming).toEqual(markers)
+    store.setImported(imported('second.mp4', 1_000))
+    expect(useProjectStore.getState().sectorTiming).toEqual({ s1: null, s2: null })
+  })
   it('changes for replacements even when both projects start with the same clip path', () => {
     const first = imported('same.mp4', 1_000)
     const second = imported('same.mp4', 2_000)

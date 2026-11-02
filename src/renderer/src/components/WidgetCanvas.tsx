@@ -58,7 +58,9 @@ function WidgetCanvas({
   const headerImageDataUrl =
     widget.type === 'timer' && widget.style.mode === 'laps'
       ? widget.style.headerImageDataUrl
-      : widget.type === 'customText'
+      : widget.type === 'sectorTimer'
+        ? widget.style.headerImageDataUrl ?? null
+        : widget.type === 'customText'
         ? widget.style.imageDataUrl
         : null
   const headerImage = useLoadedImage(headerImageDataUrl)

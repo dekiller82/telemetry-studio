@@ -18,10 +18,11 @@ export interface LapSpeedTrace {
 /** One full trace per completed lap (consecutive crossing pairs, excluding the out-lap -- mirrors
  *  lapTimesFromCrossings/computeLapDistanceCurves). Precomputed once, not per frame -- doesn't
  *  depend on cts. */
-export function computeLapSpeedTraces(samples: TelemetrySample[], crossings: number[]): LapSpeedTrace[] {
+export function computeLapSpeedTraces(samples: TelemetrySample[], crossings: number[], excluded?: ReadonlySet<number>): LapSpeedTrace[] {
   const traces: LapSpeedTrace[] = []
 
   for (let lapNumber = 1; lapNumber < crossings.length; lapNumber++) {
+    if (excluded?.has(lapNumber)) continue
     const lapStartCts = crossings[lapNumber - 1]
     const lapEndCts = crossings[lapNumber]
     if (!isGpsRangeContinuous(samples, lapStartCts, lapEndCts)) continue
@@ -50,7 +51,7 @@ export function computeLapSpeedTraces(samples: TelemetrySample[], crossings: num
  * lap between the two crossings straddling `cts`; the out-lap before any crossing counts as lap 1
  * too, per the app-wide "no separate untimed out lap" numbering decision).
  */
-export function computeCurrentLapSpeedTrace(samples: TelemetrySample[], crossings: number[], cts: number): LapSpeedTrace | null {
+export function computeCurrentLapSpeedTrace(samples: TelemetrySample[], crossings: number[], cts: number, excluded?: ReadonlySet<number>): LapSpeedTrace | null {
   if (samples.length === 0) return null
 
   let idx = -1
@@ -61,6 +62,7 @@ export function computeCurrentLapSpeedTrace(samples: TelemetrySample[], crossing
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
   if (!isGpsRangeContinuous(samples, lapStartCts, cts)) return null
   const lapNumber = Math.max(1, idx + 1)
+  if (idx >= 0 && excluded?.has(lapNumber)) return null
 
   const startIdx = findBracketIndex(samples, lapStartCts)
   const endIdx = findBracketIndex(samples, cts)

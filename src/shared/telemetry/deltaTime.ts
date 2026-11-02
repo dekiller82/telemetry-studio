@@ -62,6 +62,7 @@ function cumulativeDistanceAt(samples: TelemetrySample[], lapStartCts: number, c
  * detectLapCrossings/computeLapSectors), not per frame -- getDeltaStateAt resolves cheaply against
  * these on every query.
  */
+/** @deprecated Legacy arc-length API. Preview/export share computeTrackTiming and getTrackDeltaStateAt. */
 export function computeLapDistanceCurves(samples: TelemetrySample[], crossings: number[]): LapDistanceCurve[] {
   const curves: LapDistanceCurve[] = []
 
@@ -104,6 +105,7 @@ export function computeLapDistanceCurves(samples: TelemetrySample[], crossings: 
  * same elapsed time -- a straight time-vs-time comparison would be meaningless once the two laps'
  * paces diverge.
  */
+/** @deprecated Legacy arc-length API; new consumers must use the shared fixed-position model. */
 export function getDeltaStateAt(
   curves: LapDistanceCurve[],
   crossings: number[],

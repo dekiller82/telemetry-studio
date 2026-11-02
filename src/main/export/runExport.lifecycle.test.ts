@@ -99,6 +99,24 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('runExport lifecycle and source protection', () => {
+  it.each([1, 2] as const)('passes fixed markers and manual result decisions through the %i-renderer path', async (renderWorkers) => {
+    const config = options({
+      sectorTiming: { s1: { lat: 30.001, lon: 106.001 }, s2: { lat: 30.002, lon: 106.002 } },
+      excludedLaps: { '1000:61000': true }
+    })
+    config.settings.renderWorkers = renderWorkers
+    await runExport(config)
+    if (renderWorkers === 2) {
+      expect(mocks.parallel).toHaveBeenCalledOnce()
+      expect(mocks.parallel.mock.calls[0][0]).toMatchObject({
+        sectorTiming: config.sectorTiming, excludedLaps: config.excludedLaps
+      })
+    } else {
+      expect(mocks.serial.mock.calls[0][12]).toEqual(config.sectorTiming)
+      expect(mocks.serial.mock.calls[0][13]).toEqual(config.excludedLaps)
+    }
+  })
+
   it('probes only overlapping input clips and preserves NVENC when decoding must fall back', async () => {
     mocks.selectEncoder.mockResolvedValue({ codec: 'h264_nvenc', label: 'NVENC', decodeHwaccel: 'cuda', qualityArgs: () => [], bitrateArgs: () => [] })
     mocks.decodeProbe.mockResolvedValue({ ok: false, reason: 'no-hardware-frame' })

@@ -6,6 +6,8 @@ const data: FrameWorkerData = {
   width: 160, height: 90, widgets: [],
   telemetry: { deviceName: 'test', gpsStream: 'GPS5', videoDurationMs: 1000, samples: [], accel: [], gyro: [], gravity: [] },
   startFinish: { lat: 51, lon: -0.1 }, startFinishRadiusM: 6,
+  sectorTiming: { s1: { lat: 51.001, lon: -0.1 }, s2: { lat: 51.002, lon: -0.1 } },
+  excludedLaps: { '1000:61000': true },
   crossingAdjustmentsMs: { '2': 40 }, ignoredCrossings: { '1': true },
   trimStartMs: 200, trimEndMs: 1000, defaultFontFamily: 'Arial',
   assetDirectories: { fonts: 'fonts', icons: 'icons' }
@@ -29,7 +31,8 @@ it('passes project lap settings and the absolute trim range into the worker rend
   expect(state.createFrameRenderer).toHaveBeenCalledWith(
     data.width, data.height, data.widgets, expect.any(Object), data.startFinish,
     data.startFinishRadiusM, data.crossingAdjustmentsMs, data.ignoredCrossings,
-    data.trimEndMs, data.trimStartMs, data.defaultFontFamily, data.assetDirectories
+    data.trimEndMs, data.trimStartMs, data.defaultFontFamily, data.assetDirectories,
+    data.sectorTiming, data.excludedLaps
   )
 })
 

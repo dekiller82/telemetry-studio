@@ -66,6 +66,11 @@ const latLonSchema = z.object({
   lon: z.number()
 })
 
+const sectorTimingSchema = z.object({
+  s1: z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) }).nullable(),
+  s2: z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) }).nullable()
+}).default({ s1: null, s2: null })
+
 // .default({}) -- added after the project file format shipped, so an already-saved project (no
 // manual crossing corrections at all) still parses.
 const crossingAdjustmentsSchema = z.record(z.string(), z.number()).default({})
@@ -98,6 +103,15 @@ const timerStyleSchema = z.object({
 })
 
 const sectorTimerStyleSchema = z.object({
+  layout: z.enum(['classic', 'broadcast']).default('classic'),
+  driverName: z.string().max(60).default('DRIVER'),
+  positionLabel: z.string().max(8).default('-'),
+  tyre: z.enum(['S', 'M', 'H', 'I', 'W', '']).default(''),
+  teamLabel: z.string().max(8).default(''),
+  accentColor: z.string().default('#3671c6'),
+  headerImageDataUrl: z.string().nullable().default(null),
+  sectorHoldSeconds: z.number().min(0).max(60).default(5),
+  lapHoldSeconds: z.number().min(0).max(60).default(3),
   color: z.string(),
   labelColor: z.string(),
   textOutlineWidth: z.number(),
@@ -518,18 +532,20 @@ export const projectFileSchema = z.object({
   clips: z.array(clipInfoSchema),
   /** Filename of the sibling telemetry cache JSON, relative to the project file's own directory. */
   telemetryCacheFile: z.string(),
-  /** Legacy caches are filtered in memory on load; current caches retain import output. */
+  /** Legacy caches are filtered during load; new caches preserve the output of import/migration. */
   gpsTrackFilterVersion: z.number().int().nonnegative().optional(),
   widgets: z.array(widgetSchema),
   /** One start/finish line shared by every widget that needs lap/sector detection. */
   startFinish: latLonSchema.nullable(),
+  sectorTiming: sectorTimingSchema,
+  excludedLaps: z.record(z.string(), z.boolean()).default({}),
   // .default(...) -- added after the project file format shipped, so an already-saved project (which
   // always used the hardcoded default) still parses and keeps behaving exactly as it did before.
   startFinishRadiusM: z.number().default(DEFAULT_THRESHOLD_METERS),
   /** Manual per-crossing time corrections for the startFinish point above -- see
    *  shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: crossingAdjustmentsSchema,
-  /** Raw crossing timestamps anchor index-based corrections across GPS cleanup. */
+  /** Raw crossing times anchor index-based corrections when GPS cleanup changes detection. */
   crossingReferenceTimes: z.array(z.number()).optional(),
   /** Crossings manually deleted (a false lap detection) for the startFinish point above -- see
    *  shared/types.ts's CrossingIgnoreSet. */
@@ -573,8 +589,9 @@ const projectFileSchemaV1 = z.object({
  * just as a single-clip timeline with no trim. `hasAudio` isn't knowable from a v1 file without
  * re-probing the source (out of scope for a migration step); it's assumed `true` since that's the
  * overwhelmingly common case and the only consequence of a wrong guess is a slightly different
- * export audio-handling path, not a crash. `lrvPath` is initially absent (`null`) here; the file
- * loader discovers a matching sidecar beside the original source after parsing.
+ * export audio-handling path, not a crash. `lrvPath` similarly isn't knowable without re-probing --
+ * assumed absent (`null`), which just means the LRV-fallback preview tier is skipped for this clip,
+ * same as any freshly-imported clip that genuinely has no sidecar proxy file.
  */
 export function parseProjectFile(raw: unknown): ProjectFile {
   const v2 = projectFileSchema.safeParse(raw)
@@ -588,6 +605,8 @@ export function parseProjectFile(raw: unknown): ProjectFile {
       version: 2,
       clips: [{ video: { ...sourceVideo, hasAudio: true, lrvPath: null }, startOffsetMs: 0 }],
       startFinishRadiusM: DEFAULT_THRESHOLD_METERS,
+      sectorTiming: { s1: null, s2: null },
+      excludedLaps: {},
       crossingAdjustmentsMs: {},
       ignoredCrossings: {},
       trimStartMs: 0,

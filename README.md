@@ -50,6 +50,14 @@ speedometer widgets running together over real footage.
 - **Lap & sector detection** from a start/finish line you place on the GPS track — everything
   (timer, sector timer, delta time, predictive lap timer, speed graph, session summary, lap
   consistency) derives from it automatically.
+- **Fixed sectors and shared delta timing** — Sector Timer, Delta Time and Predicted Lap use
+  one reference circuit and fixed S1/S2 locations. Set markers from the video or edit their
+  coordinates under **WIDGETS → Sectors & Delta**. S3 ends at the shared lap start/finish line.
+  See [timing settings](docs/fixed-sector-timing.md).
+- **Manual lap results** — open **Lap results** beside **Fastest lap** to exclude or restore a
+  completed result without deleting its crossings or changing its lap number. Timing references,
+  best sectors, the tower, fastest-lap actions, comparison graphs and recap respect the selection.
+  Slow/stopped intervals suggest a review; the user decides whether their results count.
 - **Timeline lap navigation** — a "Jump to fastest lap" button, a clickable marker for every
   detected lap on the scrub bar (hover for the lap number and time), and a speed sparkline strip
   under the timeline so you can spot braking zones/corners without scrubbing blind.
@@ -68,12 +76,12 @@ speedometer widgets running together over real footage.
   crossing a few frames early or late on a given lap; click a lap marker on the timeline to select
   it, then nudge it ±1 frame with a live offset readout and a Reset button. Every widget, live
   preview and export alike, reflects the correction immediately.
-- **Adjustable start/finish detection radius, and manual lap delete/restore** — if your track's own
+- **Adjustable start/finish detection radius, and false-crossing delete/restore** — if your track's own
   layout passes close to the line somewhere that isn't the actual line (a pit lane, a hairpin), a
   false lap can get detected; tighten the detection radius (Property Panel, 3–40m) to stop it from
   happening, or click any lap marker on the timeline and delete it directly if one still slips
-  through. A deleted lap is excluded from lap/sector timing everywhere (preview and export alike)
-  and stays visible, dimmed, so it can be restored if you change your mind.
+  through. **Delete crossing** merges adjacent intervals and keeps a dimmed marker for restoration;
+  **Exclude result** keeps the real lap and only changes whether its result counts.
 - **Select all** — Ctrl/Cmd+A selects every widget on the canvas, ready for group move/align/delete.
 - **Drag/resize/rotate** every widget directly on the video preview; live preview matches the
   final export exactly.
@@ -143,10 +151,12 @@ Lap/sector-dependent widgets all key off the single start/finish point you place
   or `chronological` row order (with newest-on-top or -bottom), and a fixed visible row count so the
   tower never resizes as laps come in.
 
-- **Sector timer** — auto-divides each lap into three sectors by GPS arc-length (no manual marking
-  needed). A sector turns **purple** the moment it ties or beats your best-ever time for that
-  specific sector, even mid-lap. An optional secondary row shows the last fully completed lap's own
-  S1/S2/S3 for direct comparison.
+- **Sector timer** — uses fixed automatic thirds of one reference circuit or manually placed S1/S2
+  markers, shared with live Delta. A sector turns **purple** when it ties or beats an earlier best;
+  an optional secondary row shows the last completed lap. Choose **STYLE → F1 broadcast card**
+  for a driver/position/tyre header, optional uploaded team logo, sector bars and timestamp-driven
+  result transitions. Sector and lap result durations accept 0–60 seconds. Classic remains the
+  default; see [the card settings and design reference](docs/broadcast-sector-card.md).
 
 - **Delta time** — your in-progress lap's time vs. your fastest *completed* lap, compared at the
   same distance into the lap (not the same elapsed time, which would be meaningless once pace
@@ -378,6 +388,13 @@ the browser Performance panel are consequently unavailable during ordinary devel
   can't currently tell the two apart. **Recommendation:** copy clips to a local drive before
   importing if you hit this.
 
+## Design references
+
+The optional broadcast sector card's layout and transition timing were inspired by
+[wertewrt/F1_Lap_Timing](https://github.com/wertewrt/F1_Lap_Timing). The TypeScript/Canvas
+implementation is independent; [feature notes](docs/broadcast-sector-card.md) identify the
+referenced revision and distinguish this credit from source/asset redistribution permissions.
+
 ## License
 
 The source code in this repository is MIT licensed — see [LICENSE](LICENSE).
@@ -386,3 +403,6 @@ The bundled `Formula1-*.otf` font files under `src/renderer/src/fonts/` are **no
 license; they belong to their respective rights holder. They're included so the app's default
 timing-tower styling works out of the box, but if you fork this project for wider redistribution,
 consider swapping them for a font you have clear rights to.
+
+The broadcast card's `TitilliumWeb-Bold.ttf` is distributed under SIL OFL 1.1. Its copyright and
+license are included in [TitilliumWeb-OFL.txt](src/renderer/src/fonts/TitilliumWeb-OFL.txt).

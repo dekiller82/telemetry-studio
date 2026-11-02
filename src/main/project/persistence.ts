@@ -22,6 +22,8 @@ export async function saveProjectToFile(projectPath: string, payload: ProjectPay
     gpsTrackFilterVersion: GPS_TRACK_FILTER_VERSION,
     widgets: payload.widgets as ProjectFile['widgets'],
     startFinish: payload.startFinish,
+    sectorTiming: payload.sectorTiming ?? { s1: null, s2: null },
+    excludedLaps: payload.excludedLaps ?? {},
     startFinishRadiusM: payload.startFinishRadiusM,
     crossingAdjustmentsMs: payload.crossingAdjustmentsMs,
     crossingReferenceTimes: payload.startFinish
@@ -95,6 +97,9 @@ export async function loadProjectFromFile(projectPath: string): Promise<ProjectP
     imported: { clips, telemetry },
     widgets: project.widgets as WidgetInstance[],
     startFinish: project.startFinish,
+    sectorTiming: project.sectorTiming,
+    // Timestamp pairs match only their original interval; no raw-index migration is needed.
+    excludedLaps: project.excludedLaps,
     startFinishRadiusM: project.startFinishRadiusM,
     crossingAdjustmentsMs: remap(project.crossingAdjustmentsMs),
     ignoredCrossings: remap(project.ignoredCrossings),

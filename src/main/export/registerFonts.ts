@@ -22,6 +22,9 @@ export function getExportFontsDirectory(): string {
 
 /** Idempotent -- safe to call multiple times (e.g. once per export) without re-registering. */
 export function registerExportFonts(fontsDirectory = FONTS_DIR): void {
+  if (!GlobalFonts.has('Titillium Web')) {
+    GlobalFonts.registerFromPath(path.join(fontsDirectory, 'TitilliumWeb-Bold.ttf'), 'Titillium Web')
+  }
   if (!GlobalFonts.has(FORMULA1_REGULAR)) {
     GlobalFonts.registerFromPath(path.join(fontsDirectory, 'Formula1-Regular.otf'), FORMULA1_REGULAR)
   }

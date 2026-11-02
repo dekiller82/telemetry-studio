@@ -1,9 +1,19 @@
 import { formatTime } from '../format'
+import { drawBroadcastSectorTimer } from './drawBroadcastSectorTimer'
 import type { SectorState } from '../telemetry/sectors'
 import { resolveFontStack } from './fonts'
 import { drawFixedWidthText, drawOutlinedText, fillRoundedRect, fitFontSizePx, scaleToRect, type Canvas2DLike, type Rect } from './canvas2d'
 
 export interface SectorTimerStyle {
+  layout?: 'classic' | 'broadcast'
+  driverName?: string
+  positionLabel?: string
+  tyre?: 'S' | 'M' | 'H' | 'I' | 'W' | ''
+  teamLabel?: string
+  accentColor?: string
+  headerImageDataUrl?: string | null
+  sectorHoldSeconds?: number
+  lapHoldSeconds?: number
   color: string
   labelColor: string
   /** 0 disables the outline. */
@@ -19,6 +29,15 @@ export interface SectorTimerStyle {
 }
 
 export const DEFAULT_SECTOR_TIMER_STYLE: SectorTimerStyle = {
+  layout: 'classic',
+  driverName: 'DRIVER',
+  positionLabel: '-',
+  tyre: '',
+  teamLabel: '',
+  accentColor: '#3671c6',
+  headerImageDataUrl: null,
+  sectorHoldSeconds: 5,
+  lapHoldSeconds: 3,
   color: '#ffffff',
   labelColor: '#ffffff',
   textOutlineWidth: 2,
@@ -30,6 +49,7 @@ export const DEFAULT_SECTOR_TIMER_STYLE: SectorTimerStyle = {
 }
 
 export interface DrawSectorTimerOptions {
+  headerImage?: import('./canvas2d').CanvasImageLike | null
   rect: Rect
   style: SectorTimerStyle
   sectorState: SectorState | null
@@ -99,6 +119,10 @@ function drawSectorRow(
  * last *fully completed* lap's own S1/S2/S3 for comparison.
  */
 export function drawSectorTimer(ctx: Canvas2DLike, options: DrawSectorTimerOptions): void {
+  if (options.style.layout === 'broadcast') {
+    drawBroadcastSectorTimer(ctx, options)
+    return
+  }
   const { rect, style, sectorState, fontFamily } = options
   const fontStack = resolveFontStack(fontFamily, 'bold')
 
@@ -111,6 +135,16 @@ export function drawSectorTimer(ctx: Canvas2DLike, options: DrawSectorTimerOptio
   }
 
   if (!sectorState) return
+  if (sectorState.currentLapExcluded) {
+    ctx.save()
+    fitFontSizePx(ctx, 'LAP EXCLUDED', rect.w * 0.9, rect.h * 0.25, '700', fontStack)
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = style.color
+    ctx.fillText('LAP EXCLUDED', rect.x + rect.w / 2, rect.y + rect.h / 2)
+    ctx.restore()
+    return
+  }
 
   const outlineWidth = scaleToRect(style.textOutlineWidth, rect)
   const showLastLapRow = style.showLastLapRow && sectorState.lastLap !== null
