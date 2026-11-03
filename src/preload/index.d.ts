@@ -1,4 +1,5 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type { OverlayExportRequest } from '../shared/export/overlayExport'
 import type { ImportResult, ProjectPayload, ImportProgress, VideoMeta, WidgetInstance, WidgetLayoutPreset, RecentProject, UpdateCheckResult } from '../shared/types'
 
 interface ExportProgress {
@@ -17,7 +18,7 @@ interface Api {
   listRecentProjects: () => Promise<RecentProject[]>
   /** deliveryPresetId: an id from shared/export/deliveryPresets.ts, or omitted/undefined for the
    *  default "source quality" export (unchanged, quality-based CRF encode at the source resolution). */
-  exportVideo: (payload: ProjectPayload, deliveryPresetId?: string) => Promise<string | null>
+  exportVideo: (payload: ProjectPayload, deliveryPresetId?: string, request?: OverlayExportRequest) => Promise<string | null>
   cancelExport: () => Promise<void>
   listLayoutPresets: () => Promise<WidgetLayoutPreset[]>
   saveLayoutPreset: (name: string, widgets: WidgetInstance[]) => Promise<WidgetLayoutPreset[]>

@@ -197,6 +197,22 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
+.toolbar-menu__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.toolbar-menu__field select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+}
+
 .toolbar-menu__item {
   background: transparent;
   border: none;
