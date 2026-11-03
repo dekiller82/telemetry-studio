@@ -1,8 +1,7 @@
 import { CSSProperties, useMemo, useState } from 'react'
 import type { TelemetrySampler } from '@shared/telemetry/sampleAt'
-import { detectLapCrossings, getLapStateAt } from '@shared/telemetry/laps'
-import { computeLapSectors, getSectorStateAt } from '@shared/telemetry/sectors'
-import { computeLapDistanceCurves, getDeltaStateAt } from '@shared/telemetry/deltaTime'
+import { detectLapTiming, getLapStateAt } from '@shared/telemetry/laps'
+import { computeTrackTiming, getTrackSectorStateAt, getTrackSectorSummaryAt, getTrackDeltaStateAt } from '@shared/telemetry/trackTiming'
 import { computeCurrentLapSpeedTrace, computeLapSpeedTraces } from '@shared/telemetry/speedTrace'
 import type { SessionSummaryData } from '@shared/render/drawSessionSummary'
 import WidgetBox, { type ActiveGuides } from './WidgetBox'
@@ -22,8 +21,10 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   const selectWidget = useWidgetStore((s) => s.selectWidget)
   const startFinish = useProjectStore((s) => s.startFinish)
   const startFinishRadiusM = useProjectStore((s) => s.startFinishRadiusM)
+  const sectorTiming = useProjectStore((s) => s.sectorTiming)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
   const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
+  const excludedLaps = useProjectStore((s) => s.excludedLaps)
   const trimStartMs = useProjectStore((s) => s.trimStartMs)
   const trimEndMs = useProjectStore((s) => s.trimEndMs)
   const defaultFontFamily = useProjectStore((s) => s.defaultFontFamily)
@@ -41,29 +42,27 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   // One shared start/finish line for every widget that needs lap/sector detection -- computed
   // once here rather than duplicated per widget instance. Crossings/boundaries only depend on the
   // telemetry + chosen point, not on currentTimeMs, so this doesn't redo the O(n) scan every frame.
-  const crossings = useMemo(
+  const detected = useMemo(
     () =>
       sampler && startFinish
-        ? detectLapCrossings(sampler.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+        ? detectLapTiming(sampler.samples, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps)
         : null,
-    [sampler, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings]
+    [sampler, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps]
   )
-  const sectorBoundaries = useMemo(
-    () => (sampler && crossings ? computeLapSectors(sampler.samples, crossings) : null),
-    [sampler, crossings]
+  const crossings = detected?.crossings ?? null
+  const excludedNumbers = detected?.excludedLapNumbers
+  const timing = useMemo(
+    () => (sampler && crossings ? computeTrackTiming(sampler.samples, crossings, sectorTiming, excludedNumbers) : null),
+    [sampler, crossings, sectorTiming, excludedNumbers]
   )
-  const lapState = useMemo(() => (crossings ? getLapStateAt(crossings, currentTimeMs) : null), [crossings, currentTimeMs])
+  const lapState = useMemo(() => (crossings ? getLapStateAt(crossings, currentTimeMs, sampler?.samples, excludedNumbers) : null), [crossings, currentTimeMs, sampler, excludedNumbers])
   const sectorState = useMemo(
-    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, currentTimeMs) : null),
-    [sectorBoundaries, currentTimeMs]
-  )
-  const lapDistanceCurves = useMemo(
-    () => (sampler && crossings ? computeLapDistanceCurves(sampler.samples, crossings) : null),
-    [sampler, crossings]
+    () => (timing ? getTrackSectorStateAt(timing, currentTimeMs) : null),
+    [timing, currentTimeMs]
   )
   const deltaState = useMemo(
-    () => (sampler && crossings && lapDistanceCurves ? getDeltaStateAt(lapDistanceCurves, crossings, sampler.samples, currentTimeMs) : null),
-    [sampler, crossings, lapDistanceCurves, currentTimeMs]
+    () => (timing ? getTrackDeltaStateAt(timing, currentTimeMs) : null),
+    [timing, currentTimeMs]
   )
   // GPS Track's optional "ghost" marker (style.showGhost) -- shared across every gpsTrack widget
   // instance same as deltaState itself, computed once here rather than per-widget.
@@ -77,16 +76,16 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   // -- otherwise scrubbing early in the video would show every lap in the whole session at once,
   // same "never leak a future lap in while scrubbing" discipline as getLapStateAt/getSectorStateAt.
   const allLapSpeedTraces = useMemo(
-    () => (sampler && crossings ? computeLapSpeedTraces(sampler.samples, crossings) : []),
-    [sampler, crossings]
+    () => (sampler && crossings ? computeLapSpeedTraces(sampler.samples, crossings, excludedNumbers) : []),
+    [sampler, crossings, excludedNumbers]
   )
   const lapSpeedTraces = useMemo(
     () => (crossings ? allLapSpeedTraces.filter((t) => crossings[t.lapNumber] <= currentTimeMs) : []),
     [allLapSpeedTraces, crossings, currentTimeMs]
   )
   const currentLapSpeedTrace = useMemo(
-    () => (sampler && crossings ? computeCurrentLapSpeedTrace(sampler.samples, crossings, currentTimeMs) : null),
-    [sampler, crossings, currentTimeMs]
+    () => (sampler && crossings ? computeCurrentLapSpeedTrace(sampler.samples, crossings, currentTimeMs, excludedNumbers) : null),
+    [sampler, crossings, currentTimeMs, excludedNumbers]
   )
   // Session Summary is an outro RECAP, not a live readout -- unlike lapState/sectorState above (used
   // by Timer/SectorTimer/etc, which do need to reflect wherever the video is currently scrubbed to),
@@ -94,10 +93,10 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   // through the whole reveal window instead of visibly climbing as the video plays through its own
   // last few seconds. Only depends on trimStartMs/trimEndMs/crossings/sectorBoundaries, so this is
   // effectively a session-level constant, not something recomputed on every playback frame.
-  const finalLapState = useMemo(() => (crossings ? getLapStateAt(crossings, trimEndMs) : null), [crossings, trimEndMs])
+  const finalLapState = useMemo(() => (crossings ? getLapStateAt(crossings, trimEndMs, sampler?.samples, excludedNumbers) : null), [crossings, trimEndMs, sampler, excludedNumbers])
   const finalSectorState = useMemo(
-    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs) : null),
-    [sectorBoundaries, trimEndMs]
+    () => (timing ? getTrackSectorSummaryAt(timing, trimEndMs) : null),
+    [timing, trimEndMs]
   )
   const sessionSummaryData: SessionSummaryData | null = useMemo(() => {
     if (!sampler) return null

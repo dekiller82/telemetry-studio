@@ -163,9 +163,9 @@ describe('createTelemetrySampler sessionStatsAt (Session Summary widget)', () =>
   // independently of each other.
   const samples = [
     makeSample(0, { lat: 51.5, lon: -0.1, speed2D: 10 }),
-    makeSample(1000, { lat: 51.501, lon: -0.1, speed2D: 25 }), // fastest point
-    makeSample(2000, { lat: 51.502, lon: -0.1, speed2D: 15 }),
-    makeSample(3000, { lat: 51.503, lon: -0.1, speed2D: 20 })
+    makeSample(1000, { lat: 51.5001, lon: -0.1, speed2D: 25 }), // fastest point
+    makeSample(2000, { lat: 51.5002, lon: -0.1, speed2D: 15 }),
+    makeSample(3000, { lat: 51.5003, lon: -0.1, speed2D: 20 })
   ]
 
   it('reports zero distance/speed for a zero-width window at the very first sample', () => {
@@ -270,9 +270,9 @@ describe('createTelemetrySampler distanceAt (Distance widget)', () => {
   it('accumulates real GPS arc-length distance up to cts, never goes backwards', () => {
     const samples = [
       makeSample(0, { lat: 51.5, lon: -0.1 }),
-      makeSample(1000, { lat: 51.501, lon: -0.1 }),
-      makeSample(2000, { lat: 51.502, lon: -0.1 }),
-      makeSample(3000, { lat: 51.503, lon: -0.1 })
+      makeSample(1000, { lat: 51.5001, lon: -0.1 }),
+      makeSample(2000, { lat: 51.5002, lon: -0.1 }),
+      makeSample(3000, { lat: 51.5003, lon: -0.1 })
     ]
     const sampler = createTelemetrySampler(makeTelemetry(samples))
     expect(sampler.distanceAt(0)).toBe(0)
@@ -289,13 +289,13 @@ describe('createTelemetrySampler distanceAt (Distance widget)', () => {
 
 describe('createTelemetrySampler headingAt (Compass widget)', () => {
   it('reads ~0deg (North) when travelling due north', () => {
-    const samples = Array.from({ length: 6 }, (_, i) => makeSample(i * 200, { lat: 51.5 + i * 0.001, lon: -0.1 }))
+    const samples = Array.from({ length: 6 }, (_, i) => makeSample(i * 200, { lat: 51.5 + i * 0.00001, lon: -0.1 }))
     const sampler = createTelemetrySampler(makeTelemetry(samples))
     expect(sampler.headingAt(500, 60)).toBeCloseTo(0, 0)
   })
 
   it('reads ~90deg (East) when travelling due east', () => {
-    const samples = Array.from({ length: 6 }, (_, i) => makeSample(i * 200, { lat: 51.5, lon: -0.1 + i * 0.001 }))
+    const samples = Array.from({ length: 6 }, (_, i) => makeSample(i * 200, { lat: 51.5, lon: -0.1 + i * 0.00001 }))
     const sampler = createTelemetrySampler(makeTelemetry(samples))
     expect(sampler.headingAt(500, 60)).toBeCloseTo(90, 0)
   })
@@ -303,7 +303,7 @@ describe('createTelemetrySampler headingAt (Compass widget)', () => {
   it('carries the previous heading forward through a stationary stretch instead of snapping to a false North', () => {
     // Enough samples that smoothTrackPoints' windowed average (radius 3) doesn't blend the whole
     // array into one point -- 8 samples moving east, then 8 stopped at the final position.
-    const moving = Array.from({ length: 8 }, (_, i) => makeSample(i * 200, { lat: 51.5, lon: -0.1 + i * 0.001 }))
+    const moving = Array.from({ length: 8 }, (_, i) => makeSample(i * 200, { lat: 51.5, lon: -0.1 + i * 0.00001 }))
     const lastLon = moving[moving.length - 1].lon
     const stationary = Array.from({ length: 8 }, (_, i) => makeSample(1600 + i * 200, { lat: 51.5, lon: lastLon }))
     const sampler = createTelemetrySampler(makeTelemetry([...moving, ...stationary]))

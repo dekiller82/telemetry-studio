@@ -1,5 +1,6 @@
 import type { TelemetrySample } from '../types'
 import { distanceMeters } from './laps'
+import { isGpsRangeContinuous } from './gpsContinuity'
 import { createMonotoneCubicInterpolant, findBracketIndex } from './interpolate'
 
 export interface LapDistanceCurve {
@@ -61,12 +62,14 @@ function cumulativeDistanceAt(samples: TelemetrySample[], lapStartCts: number, c
  * detectLapCrossings/computeLapSectors), not per frame -- getDeltaStateAt resolves cheaply against
  * these on every query.
  */
+/** @deprecated Legacy arc-length API. Preview/export share computeTrackTiming and getTrackDeltaStateAt. */
 export function computeLapDistanceCurves(samples: TelemetrySample[], crossings: number[]): LapDistanceCurve[] {
   const curves: LapDistanceCurve[] = []
 
   for (let lapNumber = 1; lapNumber < crossings.length; lapNumber++) {
     const lapStartCts = crossings[lapNumber - 1]
     const lapEndCts = crossings[lapNumber]
+    if (!isGpsRangeContinuous(samples, lapStartCts, lapEndCts)) continue
     const startIdx = findBracketIndex(samples, lapStartCts)
     const endIdx = findBracketIndex(samples, lapEndCts)
     if (endIdx - startIdx < 1) continue
@@ -102,6 +105,7 @@ export function computeLapDistanceCurves(samples: TelemetrySample[], crossings: 
  * same elapsed time -- a straight time-vs-time comparison would be meaningless once the two laps'
  * paces diverge.
  */
+/** @deprecated Legacy arc-length API; new consumers must use the shared fixed-position model. */
 export function getDeltaStateAt(
   curves: LapDistanceCurve[],
   crossings: number[],
@@ -114,6 +118,9 @@ export function getDeltaStateAt(
     else break
   }
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
+  if (!isGpsRangeContinuous(samples, lapStartCts, cts)) {
+    return { deltaMs: null, baselineLapMs: null, predictedLapMs: null, ghostCts: null }
+  }
 
   const completedCurves = curves.filter((c) => c.lapEndCts <= cts)
   if (completedCurves.length === 0) {

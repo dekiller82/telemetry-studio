@@ -22,8 +22,12 @@ export interface Canvas2DLike {
   measureText(text: string): { width: number }
   translate(x: number, y: number): void
   rotate(angleRadians: number): void
+  /** Native/browser contexts support these; legacy drawing test doubles may omit them. */
+  scale?(x: number, y: number): void
+  clip?(): void
+  createLinearGradient?(x0: number, y0: number, x1: number, y1: number): CanvasGradientLike
   strokeStyle: string
-  fillStyle: string
+  fillStyle: string | CanvasGradientLike
   lineWidth: number
   lineCap: string
   lineJoin: string
@@ -40,6 +44,10 @@ export interface Rect {
   y: number
   w: number
   h: number
+}
+
+export interface CanvasGradientLike {
+  addColorStop(offset: number, colour: string): void
 }
 
 /**
@@ -132,7 +140,9 @@ export function drawFixedWidthText(
   y: number,
   fillColor: string,
   outlineWidth: number,
-  outlineColor: string
+  outlineColor: string,
+  /** Some Formula1 fonts map ':' to one dot; paint its upper dot explicitly when requested. */
+  colonDotOffset = 0
 ): void {
   let digitSlotWidth = 0
   for (let d = 0; d <= 9; d++) {
@@ -156,6 +166,7 @@ export function drawFixedWidthText(
     }
     ctx.fillStyle = fillColor
     ctx.fillText(chars[i], slotCx, y)
+    if (chars[i] === ':' && colonDotOffset > 0) ctx.fillText('.', slotCx, y - colonDotOffset)
     x += widths[i]
   }
   ctx.textAlign = savedAlign

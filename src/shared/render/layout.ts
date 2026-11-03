@@ -24,6 +24,7 @@ export function createRectFitTransform(
   const rectCenterY = rect.y + rect.h / 2
 
   return (p: ProjectedPoint) => ({
+    ...p,
     x: (p.x - centerX) * scale + rectCenterX,
     y: -(p.y - centerY) * scale + rectCenterY
   })

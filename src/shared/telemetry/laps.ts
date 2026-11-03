@@ -1,5 +1,8 @@
-import type { TelemetrySample, LatLon, CrossingAdjustments, CrossingIgnoreSet } from '../types'
+import type { TelemetrySample, LatLon, CrossingAdjustments, CrossingIgnoreSet, LapExclusionSet } from '../types'
+import { excludedLapNumbers as resolveExclusions } from './lapSelection'
 import { findBracketIndex } from './interpolate'
+import { canConnectGpsSamples, distanceMeters, isGpsRangeContinuous } from './gpsContinuity'
+export { distanceMeters } from './gpsContinuity'
 
 // Re-exported for existing call sites -- canonical definitions live in shared/types.ts since both
 // are persisted in ProjectPayload/the project file schema, not just used by lap detection.
@@ -13,6 +16,10 @@ export interface LapHistoryEntry {
 }
 
 export interface LapState {
+  /** Manual results decision, separate from whether the GPS can be calculated. */
+  currentLapExcluded?: boolean
+  /** False when a gap/jump makes the current automatic lap incomplete. */
+  currentLapValid?: boolean
   /** 1-indexed, the lap currently in progress at the queried time. Setting the start/finish point
    * and immediately crossing it starts Lap 1 -- it does not jump straight to Lap 2. */
   lapNumber: number
@@ -26,7 +33,6 @@ export interface LapState {
   history: LapHistoryEntry[]
 }
 
-const EARTH_RADIUS_M = 6371000
 /** Default start/finish detection radius, meters -- overridable per-project via
  *  ProjectPayload.startFinishRadiusM (see shared/types.ts) since how close a track's OWN layout
  *  passes near the line, and GPS accuracy, both vary a lot by track/session. */
@@ -36,19 +42,13 @@ const DEFAULT_MIN_LAP_MS = 10000
 // row count (property panel caps that at 20) -- cheap either way, this loop is O(min(laps, cap)).
 const MAX_HISTORY_ENTRIES = 50
 
-/** Flat-earth approximation, accurate enough at track scale (a few km at most). */
-export function distanceMeters(a: LatLon, b: LatLon): number {
-  const meanLatRad = (((a.lat + b.lat) / 2) * Math.PI) / 180
-  const dLat = ((a.lat - b.lat) * Math.PI) / 180
-  const dLon = (((a.lon - b.lon) * Math.PI) / 180) * Math.cos(meanLatRad)
-  return Math.sqrt(dLat * dLat + dLon * dLon) * EARTH_RADIUS_M
-}
-
 /** Nearest raw sample's lat/lon to video time `cts` -- precise enough for marking a start/finish line by scrubbing to the crossing frame. */
 export function nearestLatLon(samples: TelemetrySample[], cts: number): LatLon | null {
-  if (samples.length === 0) return null
+  if (samples.length === 0 || !Number.isFinite(cts)) return null
   const i = findBracketIndex(samples, cts)
   const j = Math.min(i + 1, samples.length - 1)
+  if (cts < samples[0].cts || cts > samples[samples.length - 1].cts) return null
+  if (cts !== samples[i].cts && i !== j && !canConnectGpsSamples(samples[i], samples[j])) return null
   const chosen = Math.abs(samples[j].cts - cts) < Math.abs(samples[i].cts - cts) ? j : i
   return { lat: samples[chosen].lat, lon: samples[chosen].lon }
 }
@@ -77,7 +77,7 @@ function applyCrossingAdjustments(rawCrossings: number[], adjustments: CrossingA
  * timing loop -- tune the threshold (ProjectPayload.startFinishRadiusM) if a track's own layout
  * (pit lane, a hairpin, a paddock road) passes close to the line at some OTHER point on track.
  */
-function detectRawLapCrossings(samples: TelemetrySample[], startFinish: LatLon, thresholdMeters: number, minLapMs: number): number[] {
+function detectRawLapCrossings(samples: TelemetrySample[], startFinish: LatLon, thresholdMeters: number, minLapMs: number, requireContinuity = true): number[] {
   if (samples.length < 3) return []
 
   const distances = samples.map((s) => distanceMeters(s, startFinish))
@@ -85,6 +85,7 @@ function detectRawLapCrossings(samples: TelemetrySample[], startFinish: LatLon, 
   let lastCrossingCts = -Infinity
 
   for (let i = 1; i < samples.length - 1; i++) {
+    if (requireContinuity && (!canConnectGpsSamples(samples[i - 1], samples[i]) || !canConnectGpsSamples(samples[i], samples[i + 1]))) continue
     const isLocalMin = distances[i] <= distances[i - 1] && distances[i] <= distances[i + 1]
     if (isLocalMin && distances[i] <= thresholdMeters) {
       const cts = samples[i].cts
@@ -97,7 +98,15 @@ function detectRawLapCrossings(samples: TelemetrySample[], startFinish: LatLon, 
   return crossings
 }
 
+/** Only for migrating old project corrections: reproduce their original raw-index identities.
+ * Never use this gap-unaware detector for live timing or rendering. */
+export function legacyLapCrossingsForMigration(samples: TelemetrySample[], startFinish: LatLon, thresholdMeters: number): number[] {
+  return detectRawLapCrossings(samples, startFinish, thresholdMeters, DEFAULT_MIN_LAP_MS, false)
+}
+
 export interface DetectedCrossing {
+  /** Original source timestamp, unchanged by manual frame nudges. */
+  rawCts: number
   /** Nudge-adjusted video time, ms (see CrossingAdjustments). */
   cts: number
   /** Stable identity for this crossing: its index in the RAW, unadjusted detection order. This is
@@ -124,7 +133,7 @@ export function detectLapCrossingsDetailed(
 ): DetectedCrossing[] {
   const raw = detectRawLapCrossings(samples, startFinish, thresholdMeters, minLapMs)
   const adjusted = applyCrossingAdjustments(raw, adjustments)
-  return adjusted.map((cts, rawIndex) => ({ cts, rawIndex, ignored: Boolean(ignoredCrossings[String(rawIndex)]) }))
+  return adjusted.map((cts, rawIndex) => ({ cts, rawCts: raw[rawIndex], rawIndex, ignored: Boolean(ignoredCrossings[String(rawIndex)]) }))
 }
 
 /**
@@ -146,10 +155,13 @@ export function detectLapCrossings(
 }
 
 /** Lap durations between consecutive crossings; the out-lap before the first crossing is excluded. */
-export function lapTimesFromCrossings(crossings: number[]): number[] {
-  const laps: number[] = []
+export function lapTimesFromCrossings(crossings: number[]): number[]
+export function lapTimesFromCrossings(crossings: number[], samples: TelemetrySample[] | undefined, excluded?: ReadonlySet<number>): (number | null)[]
+export function lapTimesFromCrossings(crossings: number[], samples?: TelemetrySample[], excluded?: ReadonlySet<number>): (number | null)[] {
+  const laps: (number | null)[] = []
   for (let i = 1; i < crossings.length; i++) {
-    laps.push(crossings[i] - crossings[i - 1])
+    laps.push(!excluded?.has(i) && (!samples || isGpsRangeContinuous(samples, crossings[i - 1], crossings[i]))
+      ? crossings[i] - crossings[i - 1] : null)
   }
   return laps
 }
@@ -160,7 +172,7 @@ export function lapTimesFromCrossings(crossings: number[]): number[] {
  * scrubbing to the line and marking it) starts Lap 1, not Lap 2 -- there is no separate untimed
  * "out lap" before it.
  */
-export function getLapStateAt(crossings: number[], cts: number): LapState {
+export function getLapStateAt(crossings: number[], cts: number, samples?: TelemetrySample[], excluded?: ReadonlySet<number>): LapState {
   let idx = -1
   for (let i = 0; i < crossings.length; i++) {
     if (crossings[i] <= cts) idx = i
@@ -170,18 +182,22 @@ export function getLapStateAt(crossings: number[], cts: number): LapState {
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
   // Only laps completed by `cts` count -- using the full crossings array here would leak future
   // laps into "best"/"last"/history while scrubbing earlier in the video than they occurred.
-  const lapTimes = lapTimesFromCrossings(crossings.slice(0, idx + 1))
+  const lapTimes = lapTimesFromCrossings(crossings.slice(0, idx + 1), samples, excluded)
+  const validTimes = lapTimes.filter((time): time is number => time !== null)
 
-  const bestLapMs = lapTimes.length > 0 ? Math.min(...lapTimes) : null
+  const bestLapMs = validTimes.length > 0 ? Math.min(...validTimes) : null
   const lastLapMs = lapTimes.length > 0 ? lapTimes[lapTimes.length - 1] : null
   const isNewBest = lastLapMs !== null && bestLapMs !== null && lastLapMs === bestLapMs
 
   const history: LapHistoryEntry[] = []
   for (let i = lapTimes.length - 1; i >= 0 && history.length < MAX_HISTORY_ENTRIES; i--) {
-    history.push({ lapNumber: i + 1, timeMs: lapTimes[i], isBest: bestLapMs !== null && lapTimes[i] === bestLapMs })
+    const timeMs = lapTimes[i]
+    if (timeMs !== null) history.push({ lapNumber: i + 1, timeMs, isBest: bestLapMs !== null && timeMs === bestLapMs })
   }
 
   return {
+    currentLapExcluded: idx >= 0 && excluded?.has(idx + 1) === true,
+    currentLapValid: !samples || isGpsRangeContinuous(samples, lapStartCts, cts),
     lapNumber: Math.max(1, idx + 1),
     currentLapElapsedMs: Math.max(0, cts - lapStartCts),
     lastLapMs,
@@ -202,19 +218,30 @@ export interface LapRange {
  *  -- unlike getLapStateAt's bestLapMs, this is meant for one-shot actions like "jump to it" or
  *  "export it", which should always target the session's real best lap regardless of where the
  *  video happens to be scrubbed to right now). Null if fewer than one full lap exists. */
-export function fastestLapRange(crossings: number[]): LapRange | null {
-  const lapTimes = lapTimesFromCrossings(crossings)
+export function fastestLapRange(crossings: number[], samples?: TelemetrySample[], excluded?: ReadonlySet<number>): LapRange | null {
+  const lapTimes = lapTimesFromCrossings(crossings, samples, excluded)
   if (lapTimes.length === 0) return null
 
-  let bestIndex = 0
-  for (let i = 1; i < lapTimes.length; i++) {
-    if (lapTimes[i] < lapTimes[bestIndex]) bestIndex = i
+  let bestIndex = -1
+  for (let i = 0; i < lapTimes.length; i++) {
+    const time = lapTimes[i]
+    if (time !== null && (bestIndex < 0 || time < lapTimes[bestIndex]!)) bestIndex = i
   }
+  if (bestIndex < 0) return null
 
   return {
     lapNumber: bestIndex + 1,
     startCts: crossings[bestIndex],
     endCts: crossings[bestIndex + 1],
-    timeMs: lapTimes[bestIndex]
+    timeMs: lapTimes[bestIndex]!
   }
+}
+
+/** One detection snapshot for results consumers in the editor, export and Workers. */
+export function detectLapTiming(
+  samples: TelemetrySample[], startFinish: LatLon, thresholdMeters = DEFAULT_THRESHOLD_METERS,
+  adjustments: CrossingAdjustments = {}, ignored: CrossingIgnoreSet = {}, exclusions: LapExclusionSet = {}
+): { crossings: number[]; excludedLapNumbers: ReadonlySet<number> } {
+  const detailed = detectLapCrossingsDetailed(samples, startFinish, thresholdMeters, undefined, adjustments, ignored)
+  return { crossings: detailed.filter((c) => !c.ignored).map((c) => c.cts), excludedLapNumbers: resolveExclusions(detailed, exclusions) }
 }

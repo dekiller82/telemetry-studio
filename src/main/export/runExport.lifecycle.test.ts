@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunExportOptions } from './runExport'
-import type { ExportFrameSource } from './parallelFrameRenderer'
+import type { ExportFrameSource, RenderedFrame } from './parallelFrameRenderer'
 import { createTelemetrySampler } from '../../shared/telemetry/sampleAt'
 import { createGpsTrackWidget } from '../../shared/widgets/defaults'
 import { ExportOutputRecoveryError } from './exportOutput'
@@ -99,6 +99,172 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('runExport lifecycle and source protection', () => {
+  it.each([1, 2, 3, 4] as const)('passes fixed markers and manual result decisions through the %i-renderer path', async (renderWorkers) => {
+    const config = options({
+      sectorTiming: { s1: { lat: 30.001, lon: 106.001 }, s2: { lat: 30.002, lon: 106.002 } },
+      excludedLaps: { '1000:61000': true }
+    })
+    config.settings.renderWorkers = renderWorkers
+    source.workerCount = source.prefetchCount = renderWorkers
+    await runExport(config)
+    if (renderWorkers > 1) {
+      expect(mocks.parallel).toHaveBeenCalledOnce()
+      expect(mocks.parallel.mock.calls[0][0]).toMatchObject({
+        sectorTiming: config.sectorTiming, excludedLaps: config.excludedLaps
+      })
+    } else {
+      expect(mocks.serial.mock.calls[0][12]).toEqual(config.sectorTiming)
+      expect(mocks.serial.mock.calls[0][13]).toEqual(config.excludedLaps)
+    }
+  })
+
+  it.each([undefined, 'video'] as const)('uses an MP4 attempt for lap.v1 with format=%s and publishes to the chosen name', async format => {
+    const config = options({ outputPath: join(tmpdir(), 'telemetry-lifecycle-lap.v1') })
+    config.settings.format = format
+    await runExport(config)
+    const args = mocks.spawn.mock.calls[0][1] as string[]
+    const tempPath = args.at(-1)!
+    expect(tempPath).toMatch(/\.tmp\.mp4$/)
+    expect(mocks.publish).toHaveBeenCalledExactlyOnceWith(tempPath, config.outputPath,
+      expect.any(String), config.clips.map(clip => clip.video.path), config.signal)
+    expect(source.close).toHaveBeenCalledOnce()
+  })
+
+  it.each([2, 3, 4] as const)('submits frames in order with %i workers even when later frames finish first', async (renderWorkers) => {
+    const frameCount = renderWorkers * 2 + 1
+    const config = options({ trimEndMs: frameCount * 20 })
+    config.settings = { ...config.settings, fps: 50, renderWorkers }
+    source.workerCount = source.prefetchCount = renderWorkers
+    let active = 0, peakActive = 0
+    source.renderFrame = vi.fn((index: number) => new Promise<RenderedFrame>(resolve => {
+      peakActive = Math.max(peakActive, ++active)
+      setTimeout(() => {
+        active--
+        resolve({ pixels: Buffer.alloc(16, index), renderMs: 1 })
+      }, index % renderWorkers === 0 ? 12 : 1)
+    }))
+    const writes = vi.spyOn(child.stdin, 'write')
+    await runExport(config)
+    expect(peakActive).toBe(renderWorkers)
+    expect(writes.mock.calls.map(args => (args[0] as Buffer)[0])).toEqual(Array.from({ length: frameCount }, (_, index) => index))
+    expect(mocks.parallel).toHaveBeenCalledWith(expect.anything(), undefined, renderWorkers)
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(mocks.publish).toHaveBeenCalledOnce()
+  })
+  it.each(['qtrle', 'prores4444'].flatMap(format => [1, 2, 3, 4].map(renderWorkers => ({ format: format as 'qtrle' | 'prores4444', renderWorkers: renderWorkers as 1 | 2 | 3 | 4 }))))('exports $format with $renderWorkers workers and no hardware probe or source-video decoder', async ({ format, renderWorkers }) => {
+    const config = options()
+    config.settings.format = format
+    config.settings.renderWorkers = renderWorkers
+    source.workerCount = source.prefetchCount = renderWorkers
+    config.outputPath = join(tmpdir(), 'telemetry-lifecycle-overlay.mov')
+    await runExport(config)
+    expect(mocks.selectEncoder).not.toHaveBeenCalled()
+    expect(mocks.decodeProbe).not.toHaveBeenCalled()
+    if (renderWorkers === 1) {
+      expect(mocks.parallel).not.toHaveBeenCalled()
+      expect(mocks.serial).toHaveBeenCalledOnce()
+    } else expect(mocks.parallel).toHaveBeenCalledWith(expect.anything(), undefined, renderWorkers)
+    const args = mocks.spawn.mock.calls[0][1] as string[]
+    expect(args).toContain(format === 'qtrle' ? 'qtrle' : 'prores_ks')
+    expect(args.filter(arg => arg === '-i')).toHaveLength(1)
+    expect(args).not.toContain(config.clips[0].video.path)
+    expect(args).toContain('-an')
+    expect(args.at(-1)).toMatch(/\.tmp\.mov$/)
+    expect(mocks.publish).toHaveBeenCalledOnce()
+    if (renderWorkers !== 1) expect(source.close).toHaveBeenCalledOnce()
+  })
+
+  it.each(['qtrle', 'prores4444'] as const)('does not retry a failed %s export as opaque H264', async (format) => {
+    const config = options()
+    config.settings.format = format
+    config.outputPath = join(tmpdir(), 'telemetry-lifecycle-overlay-failure.mov')
+    source.renderFrame = vi.fn(async () => {
+      child.stderr.write('Error while opening encoder')
+      child.close(1)
+      return { pixels: Buffer.alloc(16), renderMs: 1 }
+    })
+    await expect(runExport(config)).rejects.toThrow()
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+    expect(mocks.publish).not.toHaveBeenCalled()
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(mocks.remove).toHaveBeenCalledOnce()
+    expect(mocks.selectEncoder).not.toHaveBeenCalled()
+  })
+
+
+  it.each([2, 3, 4] as const)('cleans up a cancelled transparent export with %i workers while a frame is pending', async (renderWorkers) => {
+    const controller = new AbortController()
+    const config = options({ signal: controller.signal, trimEndMs: 250 })
+    config.settings = { ...config.settings, format: 'prores4444', renderWorkers }
+    config.outputPath = join(tmpdir(), 'telemetry-cancel-overlay.mov')
+    source.workerCount = source.prefetchCount = renderWorkers
+    source.renderFrame = vi.fn(() => new Promise<never>(() => {}))
+    const result = runExport(config).catch((error: unknown) => error)
+    await vi.waitFor(() => expect(source.renderFrame).toHaveBeenCalledTimes(renderWorkers), { interval: 1 })
+    controller.abort()
+    expect(await result).toBeInstanceOf(ExportCancelledError)
+    expect(child.kill).toHaveBeenCalledOnce()
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(mocks.remove).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\.tmp\.mov$/))
+    expect(mocks.publish).not.toHaveBeenCalled()
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+  })
+
+  it.each([2, 3, 4] as const)('cleans up a failed prefetched frame with %i workers without publishing or retrying', async (renderWorkers) => {
+    const config = options({ trimEndMs: 200 })
+    config.settings = { ...config.settings, format: 'qtrle', renderWorkers }
+    config.outputPath = join(tmpdir(), 'telemetry-failed-overlay.mov')
+    source.workerCount = source.prefetchCount = renderWorkers
+    const failure = new Error('prefetched worker failed')
+    source.renderFrame = vi.fn((index: number) => index === 1
+      ? Promise.reject(failure)
+      : Promise.resolve({ pixels: Buffer.alloc(16, index), renderMs: 1 }))
+    await expect(runExport(config)).rejects.toBe(failure)
+    expect(child.kill).toHaveBeenCalledOnce()
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(mocks.remove).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\.tmp\.mov$/))
+    expect(mocks.publish).not.toHaveBeenCalled()
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+  })
+
+  it.each(['qtrle', 'prores4444'] as const)('rejects a non-MOV %s destination before allocating renderers or encoders', async (format) => {
+    const config = options()
+    config.settings.format = format
+    await expect(runExport(config)).rejects.toThrow('.mov')
+    expect(mocks.selectEncoder).not.toHaveBeenCalled()
+    expect(mocks.parallel).not.toHaveBeenCalled()
+    expect(mocks.serial).not.toHaveBeenCalled()
+    expect(mocks.spawn).not.toHaveBeenCalled()
+  })
+
+  it.each(['qtrle', 'prores4444'] as const)('cleans up a disk-full %s export without retrying', async (format) => {
+    const config = options()
+    config.settings = { ...config.settings, format, renderWorkers: 4 }
+    config.outputPath = join(tmpdir(), 'telemetry-disk-full-overlay.mov')
+    source.workerCount = source.prefetchCount = 4
+    source.renderFrame = vi.fn(() => new Promise<never>(() => {}))
+    mocks.spawn.mockImplementationOnce(() => {
+      setTimeout(() => { child.stderr.write('No space left on device'); child.close(1) }, 5)
+      return child
+    })
+    await expect(runExport(config)).rejects.toMatchObject({ name: 'InsufficientDiskSpaceError', outputPath: config.outputPath })
+    expect(child.exited).toBe(true)
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(mocks.remove).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\.tmp\.mov$/))
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+    expect(mocks.publish).not.toHaveBeenCalled()
+  })
+
+  it('protects a source video path even when the request is a transparent export', async () => {
+    const config = options()
+    config.settings.format = 'qtrle'
+    config.outputPath = config.clips[1].video.path
+    await expect(runExport(config)).rejects.toThrow('must not overwrite a source video')
+    expect(mocks.selectEncoder).not.toHaveBeenCalled()
+    expect(mocks.parallel).not.toHaveBeenCalled()
+    expect(mocks.spawn).not.toHaveBeenCalled()
+  })
+
   it('probes only overlapping input clips and preserves NVENC when decoding must fall back', async () => {
     mocks.selectEncoder.mockResolvedValue({ codec: 'h264_nvenc', label: 'NVENC', decodeHwaccel: 'cuda', qualityArgs: () => [], bitrateArgs: () => [] })
     mocks.decodeProbe.mockResolvedValue({ ok: false, reason: 'no-hardware-frame' })

@@ -1,8 +1,11 @@
 import type { TelemetrySample } from '../types'
+import { canConnectGpsSamples } from './gpsContinuity'
 
 export interface ProjectedPoint {
   x: number
   y: number
+  /** Begins a new path: never smooth or draw across its preceding edge. */
+  breakBefore?: boolean
 }
 
 const EARTH_RADIUS_M = 6371000
@@ -13,9 +16,10 @@ export function projectTrack(samples: TelemetrySample[]): ProjectedPoint[] {
   const meanLat = samples.reduce((sum, s) => sum + s.lat, 0) / samples.length
   const cosMeanLat = Math.cos((meanLat * Math.PI) / 180)
 
-  return samples.map((s) => ({
+  return samples.map((s, i) => ({
     x: ((s.lon * Math.PI) / 180) * cosMeanLat * EARTH_RADIUS_M,
-    y: ((s.lat * Math.PI) / 180) * EARTH_RADIUS_M
+    y: ((s.lat * Math.PI) / 180) * EARTH_RADIUS_M,
+    ...(i > 0 && !canConnectGpsSamples(samples[i - 1], s) ? { breakBefore: true } : {})
   }))
 }
 
@@ -33,8 +37,10 @@ export function smoothTrackPoints(points: ProjectedPoint[], windowRadius = 3): P
 
   const smoothed: ProjectedPoint[] = new Array(n)
   for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - windowRadius)
-    const hi = Math.min(n - 1, i + windowRadius)
+    let lo = i
+    let hi = i
+    while (lo > Math.max(0, i - windowRadius) && !points[lo].breakBefore) lo--
+    while (hi < Math.min(n - 1, i + windowRadius) && !points[hi + 1].breakBefore) hi++
     let sumX = 0
     let sumY = 0
     for (let j = lo; j <= hi; j++) {
@@ -42,7 +48,7 @@ export function smoothTrackPoints(points: ProjectedPoint[], windowRadius = 3): P
       sumY += points[j].y
     }
     const count = hi - lo + 1
-    smoothed[i] = { x: sumX / count, y: sumY / count }
+    smoothed[i] = { ...points[i], x: sumX / count, y: sumY / count }
   }
   return smoothed
 }
@@ -90,8 +96,9 @@ export function positionAt(samples: TelemetrySample[], points: ProjectedPoint[],
 
   const i1 = findBracketIndex(samples, cts)
   const i2 = Math.min(i1 + 1, n - 1)
-  const i0 = Math.max(i1 - 1, 0)
-  const i3 = Math.min(i2 + 1, n - 1)
+  if (i1 !== i2 && !canConnectGpsSamples(samples[i1], samples[i2])) return points[i1]
+  const i0 = i1 > 0 && canConnectGpsSamples(samples[i1 - 1], samples[i1]) ? i1 - 1 : i1
+  const i3 = i2 + 1 < n && canConnectGpsSamples(samples[i2], samples[i2 + 1]) ? i2 + 1 : i2
 
   const t0 = samples[i1].cts
   const t1 = samples[i2].cts
@@ -177,7 +184,9 @@ export function gaussianSmoothedValueAt<T extends { cts: number }>(
   samples: T[],
   cts: number,
   sigmaMs: number,
-  selectValue: (s: T) => number
+  selectValue: (s: T) => number,
+  /** Inclusive bounds of the current continuous segment, if the stream has gaps. */
+  range?: { start: number; end: number }
 ): number {
   const n = samples.length
   if (n === 0) return 0
@@ -188,9 +197,9 @@ export function gaussianSmoothedValueAt<T extends { cts: number }>(
 
   const center = findBracketIndex(samples, cts)
   let lo = center
-  while (lo > 0 && samples[lo - 1].cts >= cts - radius) lo--
+  while (lo > (range?.start ?? 0) && samples[lo - 1].cts >= cts - radius) lo--
   let hi = center
-  while (hi < n - 1 && samples[hi + 1].cts <= cts + radius) hi++
+  while (hi < (range?.end ?? n - 1) && samples[hi + 1].cts <= cts + radius) hi++
 
   let weightedSum = 0
   let weightTotal = 0

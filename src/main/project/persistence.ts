@@ -4,6 +4,9 @@ import { basename, dirname, join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import { parseProjectFile, telemetryDataSchema, type ProjectFile } from '../../shared/project/schema'
 import type { ProjectPayload, WidgetInstance } from '../../shared/types'
+import { findLrvSibling } from '../video/lrv'
+import { filterGpsTrack, GPS_TRACK_FILTER_VERSION } from '../../shared/telemetry/gpsTrackFilter'
+import { detectLapCrossings, legacyLapCrossingsForMigration } from '../../shared/telemetry/laps'
 
 export async function saveProjectToFile(projectPath: string, payload: ProjectPayload): Promise<void> {
   const telemetryFileName = `${basename(projectPath)}.telemetry.json`
@@ -16,10 +19,15 @@ export async function saveProjectToFile(projectPath: string, payload: ProjectPay
     id: uuidv4(),
     clips: payload.imported.clips,
     telemetryCacheFile: telemetryFileName,
+    gpsTrackFilterVersion: GPS_TRACK_FILTER_VERSION,
     widgets: payload.widgets as ProjectFile['widgets'],
     startFinish: payload.startFinish,
+    sectorTiming: payload.sectorTiming ?? { s1: null, s2: null },
+    excludedLaps: payload.excludedLaps ?? {},
     startFinishRadiusM: payload.startFinishRadiusM,
     crossingAdjustmentsMs: payload.crossingAdjustmentsMs,
+    crossingReferenceTimes: payload.startFinish
+      ? detectLapCrossings(payload.imported.telemetry.samples, payload.startFinish, payload.startFinishRadiusM) : [],
     ignoredCrossings: payload.ignoredCrossings,
     trimStartMs: payload.trimStartMs,
     trimEndMs: payload.trimEndMs,
@@ -33,7 +41,18 @@ export async function loadProjectFromFile(projectPath: string): Promise<ProjectP
   const rawProject = JSON.parse(await readFile(projectPath, 'utf-8'))
   const project = parseProjectFile(rawProject)
 
-  const missingClip = project.clips.find((clip) => !existsSync(clip.video.path))
+  const clips = project.clips.map((clip) => ({
+    ...clip,
+    video: {
+      ...clip.video,
+      // Older .gpo files predate the sidecar field, and users can also move/copy a project after
+      // saving it. Re-discover a matching LRV beside the source when loading so those projects
+      // receive the same format-error fallback as a fresh import; export still uses video.path.
+      lrvPath: clip.video.lrvPath && existsSync(clip.video.lrvPath) ? clip.video.lrvPath : findLrvSibling(clip.video.path)
+    }
+  }))
+
+  const missingClip = clips.find((clip) => !existsSync(clip.video.path))
   if (missingClip) {
     throw new Error(`Source video not found: ${missingClip.video.path}`)
   }
@@ -41,14 +60,49 @@ export async function loadProjectFromFile(projectPath: string): Promise<ProjectP
   const telemetryPath = join(dirname(projectPath), project.telemetryCacheFile)
   const rawTelemetry = JSON.parse(await readFile(telemetryPath, 'utf-8'))
   const telemetry = telemetryDataSchema.parse(rawTelemetry)
+  const originalCrossings = project.crossingReferenceTimes ?? (project.startFinish
+    ? legacyLapCrossingsForMigration(telemetry.samples, project.startFinish, project.startFinishRadiusM) : [])
+  // Already-filtered caches must round-trip without reclassification, including packets that spill
+  // across a chapter boundary. Legacy migration matches import's per-clip filtering so a shorter
+  // chapter cannot become a competing branch of a longer one. Keep migration in memory.
+  if (project.gpsTrackFilterVersion !== GPS_TRACK_FILTER_VERSION) {
+    const cachedSamples = telemetry.samples
+    telemetry.samples = clips.length > 1
+      ? clips.flatMap((clip, i) => {
+          // The next chapter's start is exclusive. The final packet can reach or slightly exceed the
+          // video end, so do not truncate the last chapter's GPS samples to its video duration.
+          const endCts = clips[i + 1]?.startOffsetMs ?? Infinity
+          return filterGpsTrack(cachedSamples.filter((s) => s.cts >= clip.startOffsetMs && s.cts < endCts)).samples
+        })
+      : filterGpsTrack(cachedSamples).samples
+  }
+
+  // Corrections are indexed by RAW detection order. If cleanup removes an early false crossing,
+  // retain later corrections only at the same timestamp, never at their now-shifted old index.
+  const crossings = project.startFinish
+    ? detectLapCrossings(telemetry.samples, project.startFinish, project.startFinishRadiusM) : []
+  const unchanged = originalCrossings.length === crossings.length && originalCrossings.every((time, i) => time === crossings[i])
+  const remap = <T>(corrections: Record<string, T>): Record<string, T> => {
+    if (unchanged) return corrections
+    const indices = new Map(crossings.map((time, i) => [time, i]))
+    const mapped: Record<string, T> = {}
+    for (const [key, value] of Object.entries(corrections)) {
+      const newIndex = indices.get(originalCrossings[Number(key)])
+      if (newIndex !== undefined) mapped[String(newIndex)] = value
+    }
+    return mapped
+  }
 
   return {
-    imported: { clips: project.clips, telemetry },
+    imported: { clips, telemetry },
     widgets: project.widgets as WidgetInstance[],
     startFinish: project.startFinish,
+    sectorTiming: project.sectorTiming,
+    // Timestamp pairs match only their original interval; no raw-index migration is needed.
+    excludedLaps: project.excludedLaps,
     startFinishRadiusM: project.startFinishRadiusM,
-    crossingAdjustmentsMs: project.crossingAdjustmentsMs,
-    ignoredCrossings: project.ignoredCrossings,
+    crossingAdjustmentsMs: remap(project.crossingAdjustmentsMs),
+    ignoredCrossings: remap(project.ignoredCrossings),
     trimStartMs: project.trimStartMs,
     trimEndMs: project.trimEndMs,
     defaultFontFamily: project.defaultFontFamily

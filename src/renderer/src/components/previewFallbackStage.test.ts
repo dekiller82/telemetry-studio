@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { nextProxyStage } from './previewFallbackStage'
+import { initialPreviewSource, nextProxyStage } from './previewFallbackStage'
+
+describe('initialPreviewSource', () => {
+  it('uses the original GoPro MP4 for live preview', () => {
+    expect(initialPreviewSource('GH010230.MP4')).toEqual({ path: 'GH010230.MP4', stage: undefined })
+  })
+
+  it('also uses the original source for videos without a sidecar', () => {
+    expect(initialPreviewSource('camera.mp4')).toEqual({ path: 'camera.mp4', stage: undefined })
+  })
+})
 
 describe('nextProxyStage', () => {
   it('tries the LRV sidecar first when one is available', () => {

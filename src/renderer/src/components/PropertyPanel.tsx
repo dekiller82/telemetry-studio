@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import BroadcastSectorSettings from './BroadcastSectorSettings'
 import { convertSpeed, convertToMps, speedUnitLabel, type SpeedUnit } from '@shared/units'
 import type { WidgetInstance, WidgetLayoutPreset } from '@shared/types'
 import { GPS_STYLE_PRESETS, SPEEDOMETER_STYLE_PRESETS, TIMER_STYLE_PRESETS, type StylePreset } from '@shared/widgets/presets'
@@ -21,10 +22,11 @@ import { DEFAULT_COMPASS_STYLE } from '@shared/render/drawCompass'
 import { DEFAULT_ACCEL_TIMER_STYLE } from '@shared/render/drawAccelTimer'
 import { FORMULA1_BOLD, FORMULA1_FONT_ID, FORMULA1_REGULAR } from '@shared/render/fonts'
 import { applyThemeToWidget, LAYOUT_THEMES, type LayoutTheme } from '@shared/widgets/themes'
-import { detectLapCrossings, nearestLatLon } from '@shared/telemetry/laps'
+import { detectLapTiming, nearestLatLon, fastestLapRange } from '@shared/telemetry/laps'
 import { alignedX, alignedY, type HorizontalAlign, type VerticalAlign } from '@shared/widgets/alignment'
 import { useWidgetStore } from '../store/widgetStore'
 import { useProjectStore } from '../store/projectStore'
+import SectorTimingSettings from './SectorTimingSettings'
 import { useAlignmentStore } from '../store/alignmentStore'
 import { useFontStore } from '../store/fontStore'
 
@@ -178,6 +180,7 @@ function PropertyPanel(): React.JSX.Element {
   const setStartFinishRadiusM = useProjectStore((s) => s.setStartFinishRadiusM)
   const crossingAdjustmentsMs = useProjectStore((s) => s.crossingAdjustmentsMs)
   const ignoredCrossings = useProjectStore((s) => s.ignoredCrossings)
+  const excludedLaps = useProjectStore((s) => s.excludedLaps)
   const isExporting = useProjectStore((s) => s.isExporting)
   const paddingFraction = useAlignmentStore((s) => s.paddingFraction)
   const setPaddingFraction = useAlignmentStore((s) => s.setPaddingFraction)
@@ -203,14 +206,17 @@ function PropertyPanel(): React.JSX.Element {
   // that have no visual effect of their own when unmet, which reads as "the feature doesn't work"
   // rather than "not available yet." Recomputes lap crossings the same way WidgetLayer.tsx does for
   // the real ghost/deltaTime logic, just for this one status line.
+  const ghostEnabled = selected?.type === 'gpsTrack' && selected.style.showGhost
+  const ghostDetection = useMemo(() => ghostEnabled && imported && startFinish
+    ? detectLapTiming(imported.telemetry.samples, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps)
+    : null, [ghostEnabled, imported, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps])
   const ghostStatus = useMemo((): 'no-start-finish' | 'no-completed-lap' | 'active' | null => {
-    if (!selected || selected.type !== 'gpsTrack' || !selected.style.showGhost) return null
+    if (!ghostEnabled) return null
     if (!startFinish) return 'no-start-finish'
-    if (!imported) return 'no-completed-lap'
-    const crossings = detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
-    const hasCompletedLap = crossings.some((c, i) => i > 0 && c <= currentTimeMs)
+    if (!imported || !ghostDetection) return 'no-completed-lap'
+    const hasCompletedLap = fastestLapRange(ghostDetection.crossings.filter((c) => c <= currentTimeMs), imported.telemetry.samples, ghostDetection.excludedLapNumbers) !== null
     return hasCompletedLap ? 'active' : 'no-completed-lap'
-  }, [selected, startFinish, startFinishRadiusM, imported, currentTimeMs, crossingAdjustmentsMs, ignoredCrossings])
+  }, [ghostEnabled, startFinish, imported, currentTimeMs, ghostDetection])
 
   const [layoutPresets, setLayoutPresets] = useState<WidgetLayoutPreset[]>([])
   useEffect(() => {
@@ -317,7 +323,7 @@ function PropertyPanel(): React.JSX.Element {
           <button
             className="property-panel__add"
             onClick={setGlobalStartFinishHere}
-            disabled={!imported}
+            disabled={!imported || nearestLatLon(imported.telemetry.samples, currentTimeMs) === null}
             title="Scrub the video to the exact frame where you cross the line, then click this"
           >
             Set at current position
@@ -329,6 +335,8 @@ function PropertyPanel(): React.JSX.Element {
           )}
         </div>
         <span className="field__hint">
+          {imported && nearestLatLon(imported.telemetry.samples, currentTimeMs) === null &&
+            'No reliable GPS at this time. Choose a frame with a GPS position to set the line. '}
           {startFinish
             ? `Set at ${startFinish.lat.toFixed(5)}, ${startFinish.lon.toFixed(5)}`
             : 'Not set — used by any Timer (lap mode) or Sector Timer widget. Scrub to the lap line, then click "Set at current position".'}
@@ -354,6 +362,8 @@ function PropertyPanel(): React.JSX.Element {
           </>
         )}
       </div>
+
+      <SectorTimingSettings />
 
       <div className="property-panel__section">
         <div className="property-panel__header">
@@ -1353,9 +1363,19 @@ function PropertyPanel(): React.JSX.Element {
           </div>
 
           <span className="field__hint">
-            Uses the global start/finish line above. The lap is auto-split into 3 equal-distance sectors from GPS.
+            Uses the shared fixed sector positions and reference lap configured under Sectors &amp; Delta.
           </span>
 
+          <BroadcastSectorSettings style={style} onChange={(next) => {
+            const video = imported?.clips[0]?.video
+            if (style.layout !== 'broadcast' && next.layout === 'broadcast') {
+              const frameAspect = video && video.height > 0 ? video.width / video.height : 16 / 9
+              const h = Math.min(1, selected.w * frameAspect * 0.352)
+              updateWidget(selected.id, { style: next, h, y: Math.min(selected.y, 1 - h) })
+            } else updateWidget(selected.id, { style: next })
+          }} />
+
+          {style.layout !== 'broadcast' && <>
           <label className="field field--checkbox">
             <input
               type="checkbox"
@@ -1439,6 +1459,7 @@ function PropertyPanel(): React.JSX.Element {
             />
           </label>
 
+          </>}
           <label className="field">
             <span>Rotation ({selected.rotation}°)</span>
             <input

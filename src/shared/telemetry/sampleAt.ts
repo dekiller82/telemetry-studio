@@ -2,6 +2,7 @@ import type { ImuSample, TelemetryData, TelemetrySample } from '../types'
 import { findBracketIndex, gaussianSmoothedValueAt, positionAt, projectTrack, smoothTrackPoints, type ProjectedPoint } from './interpolate'
 import { applyCalibration, calibrateAxes, GRAVITY_MPS2, type AxisCalibration } from './imuCalibration'
 import { distanceMeters } from './laps'
+import { canConnectGpsSamples } from './gpsContinuity'
 
 export interface TrackBounds {
   minX: number
@@ -45,6 +46,8 @@ export interface ElevationProfilePoint {
 }
 
 export interface TelemetrySampler {
+  gpsCoverageFraction: number
+  gpsBreakCount: number
   /** Raw telemetry samples, e.g. for lap-crossing detection against a start/finish lat/lon. */
   samples: TelemetrySample[]
   /** Static, precomputed track polyline in local planar meters (equirectangular projection). */
@@ -135,8 +138,11 @@ function computeHeadingComponents(samples: TelemetrySample[], trackPoints: Proje
   const components: HeadingComponent[] = new Array(n)
   let bearingRad = 0
   for (let i = 0; i < n; i++) {
-    const a = i < n - 1 ? i : i - 1
-    const b = i < n - 1 ? i + 1 : i
+    if (trackPoints[i].breakBefore) bearingRad = 0
+    let a = i
+    let b = i
+    if (i + 1 < n && !trackPoints[i + 1].breakBefore) b = i + 1
+    else if (i > 0 && !trackPoints[i].breakBefore) a = i - 1
     const dx = trackPoints[b].x - trackPoints[a].x
     const dy = trackPoints[b].y - trackPoints[a].y
     if (dx * dx + dy * dy > 1e-6) bearingRad = Math.atan2(dx, dy)
@@ -170,7 +176,7 @@ function computeCumulativeDistanceM(samples: TelemetrySample[]): number[] {
   const cumDistanceM: number[] = new Array(samples.length)
   let cum = 0
   for (let i = 0; i < samples.length; i++) {
-    if (i > 0) cum += distanceMeters(samples[i - 1], samples[i])
+    if (i > 0 && canConnectGpsSamples(samples[i - 1], samples[i])) cum += distanceMeters(samples[i - 1], samples[i])
     cumDistanceM[i] = cum
   }
   return cumDistanceM
@@ -225,16 +231,39 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
   const trackCts = samples.map((s) => s.cts)
   const speedBounds = computeSpeedBounds(trackSpeeds)
   const cumDistanceM = computeCumulativeDistanceM(samples)
+  let coveredMs = 0
+  let gpsBreakCount = 0
+  for (let i = 1; i < samples.length; i++) {
+    if (canConnectGpsSamples(samples[i - 1], samples[i])) coveredMs += samples[i].cts - samples[i - 1].cts
+    else gpsBreakCount++
+  }
   const elevationProfile: ElevationProfilePoint[] = samples.map((s, i) => ({ distanceM: cumDistanceM[i], altitude: s.altitude, cts: s.cts }))
   const headingComponents = computeHeadingComponents(samples, trackPoints)
+  // Reuse one range object per segment. GPS-derived smoothing must not pull in readings from
+  // the other side of a jump, even when the user chooses a wide smoothing window.
+  const smoothingRanges: { start: number; end: number }[] = new Array(samples.length)
+  let segmentStart = 0
+  for (let i = 1; i <= samples.length; i++) {
+    if (i === samples.length || trackPoints[i].breakBefore) {
+      smoothingRanges.fill({ start: segmentStart, end: i - 1 }, segmentStart, i)
+      segmentStart = i
+    }
+  }
+
+  function smoothGpsValueAt<T extends { cts: number }>(values: T[], cts: number, smoothingMs: number, selectValue: (s: T) => number): number {
+    return gaussianSmoothedValueAt(values, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), selectValue,
+      smoothingRanges[findBracketIndex(samples, cts)])
+  }
 
   function hasPositionAt(cts: number): boolean {
-    return samples.length > 0 && cts >= samples[0].cts && cts <= samples[samples.length - 1].cts
+    if (!Number.isFinite(cts) || samples.length === 0 || cts < samples[0].cts || cts > samples[samples.length - 1].cts) return false
+    const i = findBracketIndex(samples, cts)
+    return cts === samples[i].cts || (i + 1 < samples.length && canConnectGpsSamples(samples[i], samples[i + 1]))
   }
 
   function elevationAt(cts: number, smoothingMs = DEFAULT_ELEVATION_SMOOTHING_MS): number {
     if (!hasPositionAt(cts)) return 0
-    return gaussianSmoothedValueAt(samples, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), (s) => s.altitude)
+    return smoothGpsValueAt(samples, cts, smoothingMs, (s) => s.altitude)
   }
 
   function distanceAt(cts: number): number {
@@ -244,9 +273,8 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
 
   function headingAt(cts: number, smoothingMs = DEFAULT_HEADING_SMOOTHING_MS): number {
     if (!hasPositionAt(cts) || headingComponents.length === 0) return 0
-    const window = Math.max(MIN_SMOOTHING_MS, smoothingMs)
-    const cosAvg = gaussianSmoothedValueAt(headingComponents, cts, window, (c) => c.cosB)
-    const sinAvg = gaussianSmoothedValueAt(headingComponents, cts, window, (c) => c.sinB)
+    const cosAvg = smoothGpsValueAt(headingComponents, cts, smoothingMs, (c) => c.cosB)
+    const sinAvg = smoothGpsValueAt(headingComponents, cts, smoothingMs, (c) => c.sinB)
     const deg = (Math.atan2(sinAvg, cosAvg) * 180) / Math.PI
     return deg < 0 ? deg + 360 : deg
   }
@@ -302,6 +330,8 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
   }
 
   return {
+    gpsCoverageFraction: telemetry.videoDurationMs > 0 ? Math.min(1, coveredMs / telemetry.videoDurationMs) : 0,
+    gpsBreakCount,
     samples,
     trackPoints,
     bounds,
@@ -311,7 +341,7 @@ export function createTelemetrySampler(telemetry: TelemetryData): TelemetrySampl
     positionAt: (cts: number) => positionAt(samples, trackPoints, cts),
     hasPositionAt,
     speedAt: (cts: number, smoothingMs = DEFAULT_SPEED_SMOOTHING_MS) =>
-      hasPositionAt(cts) ? gaussianSmoothedValueAt(samples, cts, Math.max(MIN_SMOOTHING_MS, smoothingMs), (s) => s.speed2D) : 0,
+      hasPositionAt(cts) ? smoothGpsValueAt(samples, cts, smoothingMs, (s) => s.speed2D) : 0,
     hasImuData: accel.length > 0,
     defaultAxisCalibration,
     gForceAt,

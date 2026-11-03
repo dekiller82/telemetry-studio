@@ -7,14 +7,13 @@ import { drawSpeedometerAnalogStaticLayer, drawSpeedometerDigitalStaticLayer } f
 import { drawGForceStaticLayer } from '../../shared/render/drawGForceDiagram'
 import type { Canvas2DLike, CanvasImageLike, StaticWidgetLayer, Rect } from '../../shared/render/canvas2d'
 import type { TelemetrySampler } from '../../shared/telemetry/sampleAt'
-import { detectLapCrossings, getLapStateAt } from '../../shared/telemetry/laps'
-import { computeLapSectors, getSectorStateAt } from '../../shared/telemetry/sectors'
-import { computeLapDistanceCurves, getDeltaStateAt } from '../../shared/telemetry/deltaTime'
+import { detectLapTiming, getLapStateAt } from '../../shared/telemetry/laps'
+import { computeTrackTiming, getTrackSectorStateAt, getTrackSectorSummaryAt, getTrackDeltaStateAt } from '../../shared/telemetry/trackTiming'
 import { detectApexEvents, type ApexEvent } from '../../shared/telemetry/apex'
 import { detectAccelRuns, getAccelRunStateAt, type AccelRun } from '../../shared/telemetry/accelRuns'
 import { computeCurrentLapSpeedTrace, computeLapSpeedTraces } from '../../shared/telemetry/speedTrace'
 import { buildManualCalibration, buildManualCalibrationForRoll } from '../../shared/telemetry/imuCalibration'
-import type { CrossingAdjustments, CrossingIgnoreSet, LatLon, WidgetInstance } from '../../shared/types'
+import type { CrossingAdjustments, CrossingIgnoreSet, LapExclusionSet, LatLon, SectorTimingSettings, WidgetInstance } from '../../shared/types'
 import { speedSmoothingMsFor } from '../../shared/widgets/helpers'
 import { registerExportFonts } from './registerFonts'
 import { loadHeaderImageFromDataUrl } from './loadHeaderImage'
@@ -43,7 +42,9 @@ export async function createFrameRenderer(
   /** Project-wide default font (FORMULA1_FONT_ID or a real system font family) -- any widget's own
    *  fontFamily overrides this. */
   defaultFontFamily: string,
-  assetDirectories?: { fonts: string; icons: string }
+  assetDirectories?: { fonts: string; icons: string },
+  sectorTiming?: SectorTimingSettings,
+  excludedLaps?: LapExclusionSet
 ): Promise<{ roi: OverlayRoi; renderFrame: (sampleCts: number, elapsedMs: number) => Buffer }> {
   registerExportFonts(assetDirectories?.fonts)
 
@@ -65,20 +66,21 @@ export async function createFrameRenderer(
   // Precomputed once (O(n) over telemetry samples), not per-frame -- crossings/sectors/lap-distance
   // curves don't depend on cts. Every widget that needs lap detection shares the same global
   // start/finish line.
-  const crossings = startFinish
-    ? detectLapCrossings(sampler.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+  const detected = startFinish
+    ? detectLapTiming(sampler.samples, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, excludedLaps)
     : null
-  const sectorBoundaries = crossings ? computeLapSectors(sampler.samples, crossings) : null
-  const lapDistanceCurves = crossings ? computeLapDistanceCurves(sampler.samples, crossings) : null
+  const crossings = detected?.crossings ?? null
+  const excludedNumbers = detected?.excludedLapNumbers
+  const timing = crossings ? computeTrackTiming(sampler.samples, crossings, sectorTiming, excludedNumbers) : null
   // Full per-lap trace list, precomputed once -- must still be filtered to laps completed BY each
   // frame's own sampleCts before drawing (below), or every frame (even ones during lap 1) would show
   // every lap in the whole session at once, same discipline as lapState/sectorState/deltaState.
-  const allLapSpeedTraces = crossings ? computeLapSpeedTraces(sampler.samples, crossings) : []
+  const allLapSpeedTraces = crossings ? computeLapSpeedTraces(sampler.samples, crossings, excludedNumbers) : []
   // Session Summary is an outro RECAP, not a live readout -- unlike lapState/sectorState per frame
   // below (which DO need to reflect that frame's own sampleCts), its data is the session's true
   // final totals, resolved once here rather than recomputed (and drifting) on every frame.
-  const finalLapState = crossings ? getLapStateAt(crossings, trimEndMs) : null
-  const finalSectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs) : null
+  const finalLapState = crossings ? getLapStateAt(crossings, trimEndMs, sampler.samples, excludedNumbers) : null
+  const finalSectorState = timing ? getTrackSectorSummaryAt(timing, trimEndMs) : null
   const finalSessionStats = sampler.sessionStatsAt(trimStartMs, trimEndMs)
   const sessionSummaryData = {
     totalLaps: finalLapState?.history.length ?? 0,
@@ -153,6 +155,9 @@ export async function createFrameRenderer(
         headerImageByWidgetId.set(widget.id, await loadHeaderImageFromDataUrl(widget.style.headerImageDataUrl))
       }
     }
+    if (widget.type === 'sectorTimer' && widget.style.headerImageDataUrl) {
+      headerImageByWidgetId.set(widget.id, await loadHeaderImageFromDataUrl(widget.style.headerImageDataUrl))
+    }
     if (widget.type === 'customText' && widget.style.imageDataUrl) {
       headerImageByWidgetId.set(widget.id, await loadHeaderImageFromDataUrl(widget.style.imageDataUrl))
     }
@@ -203,14 +208,14 @@ export async function createFrameRenderer(
       try {
         const dotPosition = sampler.positionAt(sampleCts)
         // Shared by every widget (the same global start/finish line), so resolved once per frame rather than per widget.
-        const lapState = crossings ? getLapStateAt(crossings, sampleCts) : null
-        const sectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, sampleCts) : null
+        const lapState = crossings ? getLapStateAt(crossings, sampleCts, sampler.samples, excludedNumbers) : null
+        const sectorState = timing ? getTrackSectorStateAt(timing, sampleCts) : null
         const deltaState =
-          crossings && lapDistanceCurves ? getDeltaStateAt(lapDistanceCurves, crossings, sampler.samples, sampleCts) : null
+          timing ? getTrackDeltaStateAt(timing, sampleCts) : null
         // GPS Track's optional "ghost" marker -- shared across every gpsTrack widget instance, same as
         // deltaState itself, resolved once per frame.
         const ghostPosition = deltaState?.ghostCts != null ? sampler.positionAt(deltaState.ghostCts) : null
-        const currentLapSpeedTrace = crossings ? computeCurrentLapSpeedTrace(sampler.samples, crossings, sampleCts) : null
+        const currentLapSpeedTrace = crossings ? computeCurrentLapSpeedTrace(sampler.samples, crossings, sampleCts, excludedNumbers) : null
         const lapSpeedTraces = crossings ? allLapSpeedTraces.filter((t) => crossings[t.lapNumber] <= sampleCts) : []
 
         for (const widget of sortedWidgets) {

@@ -5,6 +5,8 @@ import { createWidget } from '../../shared/widgets/defaults'
 import { drawWidget } from '../../shared/render/drawWidget'
 import { buildColoredGpsTrackCache } from '../../shared/render/drawGpsWidget'
 import { createFrameRenderer } from './frameRenderer'
+import { detectLapTiming } from '../../shared/telemetry/laps'
+import { lapExclusionKey } from '../../shared/telemetry/lapSelection'
 
 vi.mock('./registerFonts', () => ({ registerExportFonts: vi.fn() }))
 vi.mock('./loadIcons', () => ({ loadFastestLapIcon: async () => null }))
@@ -35,6 +37,35 @@ async function timerRenderer(radius: number, ignored: CrossingIgnoreSet = {}, ad
 }
 
 describe('frame renderer upstream integration', () => {
+  it('applies manual decisions to exported results, sectors, delta, traces and recap without deleting a lap', async () => {
+    const data: TelemetryData = { ...telemetry, videoDurationMs: 90_000, samples: Array.from({ length: 901 }, (_, i) => {
+      const theta = i * 100 / 20_000 * 2 * Math.PI
+      return { cts: i * 100, lat: 51 + 30 * Math.sin(theta) / 111195,
+        lon: -0.1 + 30 * Math.cos(theta) / (111195 * Math.cos(51 * Math.PI / 180)),
+        altitude: 0, speed2D: 9.4248, speed3D: 9.4248 }
+    }) }
+    const start = { lat: data.samples[0].lat, lon: data.samples[0].lon }
+    const detected = detectLapTiming(data.samples, start, 5)
+    expect(detected.crossings).toEqual([20_000, 40_000, 60_000, 80_000])
+    const excluded = { [lapExclusionKey(20_000, 40_000)]: true }
+    const renderer = await createFrameRenderer(640, 360, [createWidget('sectorTimer')], createTelemetrySampler(data),
+      start, 5, {}, {}, 90_000, 0, 'Arial', undefined, undefined, excluded)
+    renderer.renderFrame(30_000, 30_000)
+    const current = vi.mocked(drawWidget).mock.lastCall![3]
+    expect(current.lapState?.lapNumber).toBe(1)
+    expect(current.lapState?.currentLapExcluded).toBe(true)
+    expect(current.lapState?.currentLapElapsedMs).toBe(10_000)
+    expect(current.sectorState?.currentLapExcluded).toBe(true)
+    expect(current.deltaState?.deltaMs).toBeNull()
+    expect(current.currentLapSpeedTrace).toBeNull()
+    renderer.renderFrame(65_000, 65_000)
+    const next = vi.mocked(drawWidget).mock.lastCall![3]
+    expect(next.lapState?.lapNumber).toBe(3)
+    expect(next.lapState?.history.map((l) => l.lapNumber)).toEqual([2])
+    expect(next.lapSpeedTraces?.map((l) => l.lapNumber)).toEqual([2])
+    expect(next.deltaState?.baselineLapMs).toBe(20_000)
+    expect(next.sessionSummaryData?.totalLaps).toBe(2)
+  })
   it('reuses the graph cache across frames and preserves immediate drawing for rotated graphs', async () => {
     const graph = createWidget('speedDistanceGraph')
     const rotated = { ...createWidget('speedDistanceGraph'), rotation: 15 }
@@ -65,6 +96,31 @@ describe('frame renderer upstream integration', () => {
     const state = vi.mocked(drawWidget).mock.lastCall![3].lapState!
     expect(state.lapNumber).toBe(2)
     expect(state.currentLapElapsedMs).toBe(960)
+  })
+
+  it('also excludes laps with GPS gaps from the exported session recap', async () => {
+    const renderer = await timerRenderer(15)
+    renderer.renderFrame(32000, 32000)
+    const context = vi.mocked(drawWidget).mock.lastCall![3]
+    expect(context.sessionSummaryData?.totalLaps).toBe(0)
+    expect(context.sessionSummaryData?.bestLapMs).toBeNull()
+  })
+
+  it('keeps the exported sector clock moving from the latest crossing after skipped GPS laps', async () => {
+    const renderer = await createFrameRenderer(
+      640, 360, [createWidget('sectorTimer')], createTelemetrySampler(telemetry),
+      startFinish, 15, {}, {}, 33000, 0, 'Arial'
+    )
+    renderer.renderFrame(31100, 31100)
+    expect(vi.mocked(drawWidget).mock.lastCall![3].sectorState?.currentSectorElapsedMs).toBe(100)
+
+    renderer.renderFrame(32000, 32000)
+    const context = vi.mocked(drawWidget).mock.lastCall![3]
+    expect(context.lapState?.currentLapValid).toBe(true)
+    expect(context.lapState?.currentLapElapsedMs).toBe(1000)
+    expect(context.sectorState?.currentSectorElapsedMs).toBe(1000)
+    expect(context.sectorState?.lastLap).toBeNull()
+    expect(context.sectorState?.bestS1Ms).toBeNull()
   })
 
   it('prepares cropped GPS geometry and its colored cache once for all subsequent frames', async () => {

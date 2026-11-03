@@ -1,3 +1,15 @@
+.sector-timing-map { width: 100%; max-height: 190px; margin-top: 8px; background: #111115; border-radius: 6px; }
+.sector-marker-editor { margin-top: 12px; padding-top: 8px; border-top: 1px solid #303038; }
+.sector-marker-coordinates { display: flex; gap: 8px; }
+.sector-marker-coordinates .field { min-width: 0; flex: 1; }
+.sector-marker-coordinates input { width: 100%; box-sizing: border-box; }
+.sector-timing-error { color: #ffd166; font-size: 12px; line-height: 1.4; }
+
+@font-face {
+  font-family: 'Titillium Web';
+  src: url('../fonts/TitilliumWeb-Bold.ttf') format('truetype');
+}
+
 /* Registered identically (same family-name strings) in the main process via GlobalFonts.registerFromPath
    for @napi-rs/canvas during export -- the alias must match exactly or preview/export fonts diverge. */
 @font-face {
@@ -183,6 +195,22 @@ body {
   border-radius: 8px;
   padding: 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.toolbar-menu__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.toolbar-menu__field select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
 }
 
 .toolbar-menu__item {
@@ -576,6 +604,7 @@ body {
 
 .timeline-nudge {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   background: var(--bg-panel);
@@ -1206,3 +1235,32 @@ body {
   font-size: 13px;
   color: var(--text);
 }
+
+.timeline__lap-marker--excluded { background: #a8abb2; }
+.timeline__excluded-lap {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  background: repeating-linear-gradient(135deg, rgba(168, 171, 178, 0.5) 0 3px, transparent 3px 6px);
+  pointer-events: none;
+}
+.timeline-lap-results {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.timeline-lap-results p { margin: 0 0 6px; color: var(--text-dim); }
+.timeline-lap-results__list { max-height: 170px; overflow: auto; }
+.timeline-lap-results__row {
+  display: grid;
+  grid-template-columns: 65px minmax(165px, 1fr) 90px 120px minmax(120px, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 4px;
+}
+.timeline-lap-results__row--excluded { color: var(--text-dim); background: rgba(168, 171, 178, 0.08); }
+.timeline-lap-results__row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.timeline-lap-results__row input { accent-color: var(--accent); }

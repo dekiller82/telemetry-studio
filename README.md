@@ -27,10 +27,20 @@ speedometer widgets running together over real footage.
   relying on whatever order the file picker happens to return. A clip with no GPS fix yet (commonly
   the very first chapter, started before the GPS module locked) no longer blocks the rest of the
   import — it just contributes a blank stretch on GPS-driven widgets for its own duration.
-- **Automatic GPS noise filtering** — physically-implausible GPS position jumps (a sudden snap
-  inconsistent with the reported speed) are detected and removed before they reach the map/track
-  widgets, bridging short isolated spikes and only discarding a longer bad stretch when a clearly
-  dominant, trustworthy segment remains.
+- **GPS continuity and noise filtering** — reject malformed timestamps and implausible position
+  jumps, remove unsupported reacquisition bursts, and preserve independently supported track
+  branches when neither dominates. Gaps longer than 2 seconds and implausible transitions split
+  the map and smoothing windows; they add no distance and produce no interpolated GPS readings.
+  Incomplete laps do not contribute lap/sector bests, fastest-lap selection, speed traces, or delta
+  and predicted-lap comparisons.
+- **Preview seeking on release** — the timeline playhead and trim handles use local drafts while
+  dragging. Release commits the trim/time and submits the latest seek; same-source decoder work
+  waits for the previous operation to settle. GPS map geometry and color caches are reused between
+  frames and rebuilt when their sampler, trim range, style, or dimensions change.
+- **Older project recovery** — reopening discovers missing or stale LRV sidecar paths beside the
+  source. Legacy GPS caches are cleaned in memory per chapter, with manual crossing nudges and
+  deleted-crossing decisions matched by original crossing timestamp. Saving records the filter
+  version and crossing references so cleaned caches reopen without repeated reclassification.
 - **18 widgets** (17 telemetry-driven, plus a freeform text/logo widget), each fully configurable
   (colors, fonts, size, smoothing) via the property panel — see [Widgets](#widgets) below for what
   each one shows and its own options.
@@ -40,6 +50,14 @@ speedometer widgets running together over real footage.
 - **Lap & sector detection** from a start/finish line you place on the GPS track — everything
   (timer, sector timer, delta time, predictive lap timer, speed graph, session summary, lap
   consistency) derives from it automatically.
+- **Fixed sectors and shared delta timing** — Sector Timer, Delta Time and Predicted Lap use
+  one reference circuit and fixed S1/S2 locations. Set markers from the video or edit their
+  coordinates under **WIDGETS → Sectors & Delta**. S3 ends at the shared lap start/finish line.
+  See [timing settings](docs/fixed-sector-timing.md).
+- **Manual lap results** — open **Lap results** beside **Fastest lap** to exclude or restore a
+  completed result without deleting its crossings or changing its lap number. Timing references,
+  best sectors, the tower, fastest-lap actions, comparison graphs and recap respect the selection.
+  Slow/stopped intervals suggest a review; the user decides whether their results count.
 - **Timeline lap navigation** — a "Jump to fastest lap" button, a clickable marker for every
   detected lap on the scrub bar (hover for the lap number and time), and a speed sparkline strip
   under the timeline so you can spot braking zones/corners without scrubbing blind.
@@ -58,12 +76,12 @@ speedometer widgets running together over real footage.
   crossing a few frames early or late on a given lap; click a lap marker on the timeline to select
   it, then nudge it ±1 frame with a live offset readout and a Reset button. Every widget, live
   preview and export alike, reflects the correction immediately.
-- **Adjustable start/finish detection radius, and manual lap delete/restore** — if your track's own
+- **Adjustable start/finish detection radius, and false-crossing delete/restore** — if your track's own
   layout passes close to the line somewhere that isn't the actual line (a pit lane, a hairpin), a
   false lap can get detected; tighten the detection radius (Property Panel, 3–40m) to stop it from
   happening, or click any lap marker on the timeline and delete it directly if one still slips
-  through. A deleted lap is excluded from lap/sector timing everywhere (preview and export alike)
-  and stays visible, dimmed, so it can be restored if you change your mind.
+  through. **Delete crossing** merges adjacent intervals and keeps a dimmed marker for restoration;
+  **Exclude result** keeps the real lap and only changes whether its result counts.
 - **Select all** — Ctrl/Cmd+A selects every widget on the canvas, ready for group move/align/delete.
 - **Drag/resize/rotate** every widget directly on the video preview; live preview matches the
   final export exactly.
@@ -71,6 +89,10 @@ speedometer widgets running together over real footage.
   with crash recovery.
 - **Export just your fastest lap** as its own short clip, with configurable padding (seconds
   before/after) — doesn't touch your project's actual saved trim range.
+- **Transparent HUD export** — choose Animation or ProRes 4444 MOV, containing all widgets or
+  only the selected widgets, at source dimensions and frame rate without camera video or audio.
+  Both retain alpha for compositing above separately graded footage in another editor.
+  See [transparent HUD export](docs/transparent-hud-export.md) for timing, colour and alpha setup.
 - **Delivery presets** — a dropdown next to Export Video bundles resolution + bitrate for YouTube
   (4K/1080p), Instagram/TikTok/Reels, and Twitter/X, alongside the default native-resolution
   "Source quality" export. A warning appears (with a one-click switch to the 4K preset) if your
@@ -98,11 +120,16 @@ speedometer widgets running together over real footage.
   (NVIDIA NVENC, Intel Quick Sync, AMD AMF) before trusting it, falling back to CPU (libx264) if
   none is available or the GPU encoder fails partway through. See [GPU acceleration](#gpu-acceleration)
   below for exactly what's accelerated on which vendor.
-- **Bounded export rendering** — two background workers generate HUD frames in order, with one
-  outstanding frame per worker and FFmpeg backpressure. Static layers and eligible speed graphs
-  are cached, and the transparent overlay is cropped when its bounds can be safely determined.
-  Cancellation preserves an existing destination, and an export cannot replace an imported source.
-  See [export performance and diagnostics](docs/export-performance.md) for measurements and limits.
+- **Bounded export rendering** — choose **1, 2, 3 or 4 workers** under **File → Export rendering**.
+  The default remains **2**, and the choice is remembered locally for ordinary, best-lap and
+  transparent exports. One worker uses the serial, lower-memory path; parallel exports keep one
+  outstanding request per worker and submit frames to FFmpeg in order, with backpressure.
+  Static layers and eligible speed graphs are cached, and the overlay is cropped when its bounds
+  can be safely determined. Worker initialization failure falls back to one renderer. More workers
+  use more memory and do not guarantee faster export; four-worker real-media throughput and peak
+  memory have not been measured. Cancellation preserves an existing destination, and an export
+  cannot replace an imported source. See [export performance and diagnostics](docs/export-performance.md)
+  for the existing measurements and limits.
 
 ## Widgets
 
@@ -133,10 +160,12 @@ Lap/sector-dependent widgets all key off the single start/finish point you place
   or `chronological` row order (with newest-on-top or -bottom), and a fixed visible row count so the
   tower never resizes as laps come in.
 
-- **Sector timer** — auto-divides each lap into three sectors by GPS arc-length (no manual marking
-  needed). A sector turns **purple** the moment it ties or beats your best-ever time for that
-  specific sector, even mid-lap. An optional secondary row shows the last fully completed lap's own
-  S1/S2/S3 for direct comparison.
+- **Sector timer** — uses fixed automatic thirds of one reference circuit or manually placed S1/S2
+  markers, shared with live Delta. A sector turns **purple** when it ties or beats an earlier best;
+  an optional secondary row shows the last completed lap. Choose **STYLE → F1 broadcast card**
+  for a driver/position/tyre header, optional uploaded team logo, sector bars and timestamp-driven
+  result transitions. Sector and lap result durations accept 0–60 seconds. Classic remains the
+  default; see [the card settings and design reference](docs/broadcast-sector-card.md).
 
 - **Delta time** — your in-progress lap's time vs. your fastest *completed* lap, compared at the
   same distance into the lap (not the same elapsed time, which would be meaningless once pace
@@ -262,9 +291,23 @@ electron-builder for the parts that need Apple's own tooling (codesigning, DMG c
 [release workflow](.github/workflows/release.yml) builds all three platforms natively in CI via a
 GitHub Actions matrix, triggered by pushing a `v*.*.*` tag.
 
+## Transparent HUD export
+
+The export-content selector offers **Transparent HUD (MOV Animation)** and **Transparent HUD
+(ProRes 4444)**. Choose all widgets or the selected widgets, then export to a `.mov` file.
+Delivery downscaling and bitrate presets are ignored so the HUD matches the source dimensions,
+frame rate and widget coordinates. The MOV begins at timestamp zero and contains no camera video
+or audio. Place it above the source at the exported range's start, including any best-lap padding.
+
+Both formats use straight alpha and sRGB transfer with BT.709 primaries. Animation preserves RGB;
+ProRes 4444 is a high-quality YUV intermediate with alpha. Grade the camera footage separately and
+interpret the HUD as sRGB graphics. Both codecs encode on the CPU; a transparent export failure
+is reported without switching to opaque H.264. See [transparent HUD export](docs/transparent-hud-export.md)
+for editor setup, cancellation behavior and validation limits.
+
 ## GPU acceleration
 
-Export runs everything through ffmpeg. On startup of each export, `selectVideoEncoder` (see
+Combined video + HUD MP4 export runs everything through ffmpeg. On startup of each export, `selectVideoEncoder` (see
 [`src/main/export/gpuEncoder.ts`](src/main/export/gpuEncoder.ts)) tries, in order:
 
 1. **NVIDIA NVENC** (`h264_nvenc`) — GPU encode. CUDA decode is enabled after a separate probe
@@ -319,7 +362,23 @@ flat sample-array format, and sampled at arbitrary timestamps through `Telemetry
 (`shared/telemetry/sampleAt.ts`), which both the live preview and the frame-by-frame export
 renderer use identically.
 
+In development only, an early bootstrap bounds React component/scheduler Performance entries by
+omitting their rich details and clearing those entries. Other Performance measurements retain
+their normal behavior; production does not install the guard. Detailed React component tracks in
+the browser Performance panel are consequently unavailable during ordinary development sessions.
+
 ## Known limitations
+
+- **Scrubbing holds the video frame and telemetry widgets until release.** The local timeline
+  playhead/trim draft moves during the gesture. Preview starts with the original MP4; LRV, remux,
+  and transcode fallbacks run only after a format/codec error. There is no timeout that forces
+  another seek into a busy decoder or automatically replaces a merely slow source. Navigation to
+  another chapter can replace a stalled old resource; this does not guarantee recovery of a stuck
+  decoder when only one chapter is available.
+- **GPS coverage is not accuracy.** The continuity and motion checks are conservative heuristics;
+  plausible position/speed errors can remain. Gaps are left blank rather than reconstructed, and
+  only timestamp-matched crossing corrections survive a changed detection list. Loading a legacy
+  project does not rewrite it or its telemetry cache; saving is required to persist migration.
 
 - **360° footage isn't supported yet.** The app assumes a flat rectilinear video frame; a raw 360
   file will import but won't be reprojected, so widgets will overlay on the unwrapped/fisheye
@@ -352,6 +411,13 @@ renderer use identically.
   can't currently tell the two apart. **Recommendation:** copy clips to a local drive before
   importing if you hit this.
 
+## Design references
+
+The optional broadcast sector card's layout and transition timing were inspired by
+[wertewrt/F1_Lap_Timing](https://github.com/wertewrt/F1_Lap_Timing). The TypeScript/Canvas
+implementation is independent; [feature notes](docs/broadcast-sector-card.md) identify the
+referenced revision and distinguish this credit from source/asset redistribution permissions.
+
 ## License
 
 The source code in this repository is MIT licensed — see [LICENSE](LICENSE).
@@ -360,3 +426,6 @@ The bundled `Formula1-*.otf` font files under `src/renderer/src/fonts/` are **no
 license; they belong to their respective rights holder. They're included so the app's default
 timing-tower styling works out of the box, but if you fork this project for wider redistribution,
 consider swapping them for a font you have clear rights to.
+
+The broadcast card's `TitilliumWeb-Bold.ttf` is distributed under SIL OFL 1.1. Its copyright and
+license are included in [TitilliumWeb-OFL.txt](src/renderer/src/fonts/TitilliumWeb-OFL.txt).

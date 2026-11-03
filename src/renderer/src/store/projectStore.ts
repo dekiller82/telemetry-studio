@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { CrossingAdjustments, CrossingIgnoreSet, ImportResult, LatLon } from '@shared/types'
+import type { CrossingAdjustments, CrossingIgnoreSet, ImportResult, LapExclusionSet, LatLon, SectorTimingSettings } from '@shared/types'
+import { DEFAULT_SECTOR_TIMING } from '@shared/telemetry/trackTiming'
 import { FORMULA1_FONT_ID } from '@shared/render/fonts'
 import { DEFAULT_THRESHOLD_METERS } from '@shared/telemetry/laps'
 
@@ -14,6 +15,8 @@ interface ProjectState {
   /** Shared by every widget that needs lap/sector detection (timer in laps mode, sectorTimer, and
    *  any future widget with the same need) -- set once, used everywhere. */
   startFinish: LatLon | null
+  sectorTiming: SectorTimingSettings
+  excludedLaps: LapExclusionSet
   /** Start/finish detection radius, meters -- see shared/telemetry/laps.ts's
    *  DEFAULT_THRESHOLD_METERS. Tighten it if the track's own layout passes close to the line at
    *  some OTHER point than the actual line, registering a false lap. Changing it, like changing
@@ -51,6 +54,9 @@ interface ProjectState {
   setCurrentTimeMs: (ms: number) => void
   setIsPlaying: (playing: boolean) => void
   setStartFinish: (latLon: LatLon | null) => void
+  setSectorTiming: (settings: SectorTimingSettings) => void
+  setExcludedLaps: (excluded: LapExclusionSet) => void
+  setLapExcluded: (key: string, excluded: boolean) => void
   setStartFinishRadiusM: (radiusM: number) => void
   /** Loading a saved project restores its own crossing adjustments verbatim (unlike setStartFinish,
    *  which always resets them -- a freshly loaded project didn't just "change" its start/finish
@@ -79,6 +85,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
   currentTimeMs: 0,
   isPlaying: false,
   startFinish: null,
+  sectorTiming: DEFAULT_SECTOR_TIMING,
+  excludedLaps: {},
   startFinishRadiusM: DEFAULT_THRESHOLD_METERS,
   crossingAdjustmentsMs: {},
   ignoredCrossings: {},
@@ -93,6 +101,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
       currentTimeMs: 0,
       isPlaying: false,
       startFinish: null,
+      sectorTiming: DEFAULT_SECTOR_TIMING,
+      excludedLaps: {},
       startFinishRadiusM: DEFAULT_THRESHOLD_METERS,
       crossingAdjustmentsMs: {},
       ignoredCrossings: {},
@@ -110,8 +120,16 @@ export const useProjectStore = create<ProjectState>((set) => ({
     })),
   setCurrentTimeMs: (currentTimeMs) => set({ currentTimeMs }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
-  setStartFinish: (startFinish) => set({ startFinish, crossingAdjustmentsMs: {}, ignoredCrossings: {} }),
-  setStartFinishRadiusM: (startFinishRadiusM) => set({ startFinishRadiusM, crossingAdjustmentsMs: {}, ignoredCrossings: {} }),
+  setStartFinish: (startFinish) => set({ startFinish, crossingAdjustmentsMs: {}, ignoredCrossings: {}, excludedLaps: {} }),
+  setSectorTiming: (sectorTiming) => set({ sectorTiming }),
+  setExcludedLaps: (excludedLaps) => set({ excludedLaps }),
+  setLapExcluded: (key, excluded) => set((state) => {
+    const excludedLaps = { ...state.excludedLaps }
+    if (excluded) excludedLaps[key] = true
+    else delete excludedLaps[key]
+    return { excludedLaps }
+  }),
+  setStartFinishRadiusM: (startFinishRadiusM) => set({ startFinishRadiusM, crossingAdjustmentsMs: {}, ignoredCrossings: {}, excludedLaps: {} }),
   setCrossingAdjustmentsMs: (crossingAdjustmentsMs) => set({ crossingAdjustmentsMs }),
   nudgeCrossing: (index, deltaMs) =>
     set((state) => {

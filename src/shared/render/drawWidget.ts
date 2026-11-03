@@ -193,7 +193,7 @@ function renderWidgetContent(ctx: Canvas2DLike, widget: WidgetInstance, rect: Re
       })
       return
     case 'sectorTimer':
-      drawSectorTimer(ctx, { rect, style: widget.style, sectorState: data.sectorState ?? null, fontFamily })
+      drawSectorTimer(ctx, { rect, style: widget.style, sectorState: data.sectorState ?? null, fontFamily, headerImage: data.headerImage })
       return
     case 'deltaTime':
       drawDeltaTime(ctx, { rect, style: widget.style, deltaState: data.deltaState ?? null, fontFamily })

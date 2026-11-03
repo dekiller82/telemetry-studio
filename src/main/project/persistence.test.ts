@@ -1,11 +1,13 @@
-import { mkdtempSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadProjectFromFile, saveProjectToFile } from './persistence'
 import { createWidget } from '../../shared/widgets/defaults'
 import { FORMULA1_FONT_ID } from '../../shared/render/fonts'
-import type { ClipInfo, ImportResult, ProjectPayload, VideoMeta } from '../../shared/types'
+import { createTelemetrySampler } from '../../shared/telemetry/sampleAt'
+import { stitchClipTelemetry } from '../../shared/telemetry/stitchClips'
+import type { ClipInfo, ImportResult, ProjectPayload, TelemetrySample, VideoMeta } from '../../shared/types'
 
 function makeVideoMeta(path: string, overrides: Partial<VideoMeta> = {}): VideoMeta {
   return {
@@ -62,8 +64,50 @@ function makePayload(dir: string, clipCount = 1, crossingAdjustmentsMs: ProjectP
   }
 }
 
+function continuousGpsTrack(startCts: number, count: number, startNorthM = 0, stepMs = 1000): TelemetrySample[] {
+  return Array.from({ length: count }, (_, i) => ({
+    cts: startCts + i * stepMs,
+    lat: 30 + (startNorthM + 10 * i * stepMs / 1000) / 111195,
+    lon: 106,
+    altitude: 300,
+    speed2D: 10,
+    speed3D: 10
+  }))
+}
+
 describe('project persistence', () => {
   const dirs: string[] = []
+
+  it('saves manual result decisions separately from deleted crossings and defaults older projects to no exclusions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-lap-results-'))
+    dirs.push(dir)
+    const payload = makePayload(dir, 1, { '0': 40 })
+    payload.excludedLaps = { '1000:61000': true }
+    const file = join(dir, 'results.gpo')
+    await saveProjectToFile(file, payload)
+    const loaded = await loadProjectFromFile(file)
+    expect(loaded.excludedLaps).toEqual(payload.excludedLaps)
+    expect(loaded.crossingAdjustmentsMs).toEqual({ '0': 40 })
+    expect(loaded.ignoredCrossings).toEqual({})
+    const older = JSON.parse(readFileSync(file, 'utf8'))
+    delete older.excludedLaps
+    writeFileSync(file, JSON.stringify(older))
+    expect((await loadProjectFromFile(file)).excludedLaps).toEqual({})
+  })
+
+  it('round-trips fixed sector coordinates and defaults older projects to automatic gates', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-sectors-'))
+    dirs.push(dir)
+    const payload = makePayload(dir)
+    payload.sectorTiming = { s1: { lat: 30.0001, lon: 106.0002 }, s2: { lat: 30.0003, lon: 106.0004 } }
+    const file = join(dir, 'sectors.gpo')
+    await saveProjectToFile(file, payload)
+    expect((await loadProjectFromFile(file)).sectorTiming).toEqual(payload.sectorTiming)
+    const older = JSON.parse(readFileSync(file, 'utf8'))
+    delete older.sectorTiming
+    writeFileSync(file, JSON.stringify(older))
+    expect((await loadProjectFromFile(file)).sectorTiming).toEqual({ s1: null, s2: null })
+  })
 
   afterEach(() => {
     dirs.length = 0
@@ -115,6 +159,83 @@ describe('project persistence', () => {
     expect(loaded.imported.clips.map((c) => c.startOffsetMs)).toEqual([0, 20000, 40000])
     expect(loaded.trimStartMs).toBe(1000)
     expect(loaded.trimEndMs).toBe(55000)
+  })
+
+  it.each(['current', 'legacy'])('preserves both valid GPS chapters in a %s cache across save and reopen', async (format) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-persist-'))
+    dirs.push(dir)
+    const payload = makePayload(dir, 2)
+    payload.imported.clips[0].video.durationMs = 120000
+    payload.imported.clips[1].startOffsetMs = 120000
+    payload.imported.clips[1].video.durationMs = 600000
+    payload.imported.telemetry.samples = [
+      ...continuousGpsTrack(0, 120),
+      ...continuousGpsTrack(120000, 600, 6000)
+    ]
+    payload.imported.telemetry.videoDurationMs = payload.trimEndMs = 720000
+    payload.startFinish = null
+    const projectPath = join(dir, 'chapters.gpo')
+    await saveProjectToFile(projectPath, payload)
+    if (format === 'legacy') {
+      const project = JSON.parse(readFileSync(projectPath, 'utf8'))
+      delete project.crossingReferenceTimes
+      delete project.gpsTrackFilterVersion
+      writeFileSync(projectPath, JSON.stringify(project))
+    }
+    const cacheBefore = readFileSync(`${projectPath}.telemetry.json`, 'utf8')
+    const projectBefore = readFileSync(projectPath, 'utf8')
+
+    const loaded = await loadProjectFromFile(projectPath)
+    expect(loaded.imported.telemetry.samples).toEqual(payload.imported.telemetry.samples)
+    const originalSampler = createTelemetrySampler(payload.imported.telemetry)
+    const loadedSampler = createTelemetrySampler(loaded.imported.telemetry)
+    expect(loadedSampler.hasPositionAt(60000)).toBe(true)
+    expect(loadedSampler.sessionStatsAt(0, 720000)).toEqual(originalSampler.sessionStatsAt(0, 720000))
+    expect(readFileSync(`${projectPath}.telemetry.json`, 'utf8')).toBe(cacheBefore)
+    expect(readFileSync(projectPath, 'utf8')).toBe(projectBefore)
+
+    const updatedPath = join(dir, 'resaved.gpo')
+    await saveProjectToFile(updatedPath, loaded)
+    expect((await loadProjectFromFile(updatedPath)).imported.telemetry).toEqual(payload.imported.telemetry)
+  })
+
+  it('keeps short chapters and the last GPS packet at the video end when reopening', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-persist-'))
+    dirs.push(dir)
+    const payload = makePayload(dir, 2)
+    payload.imported.clips[0].video.durationMs = 90
+    payload.imported.clips[1].startOffsetMs = 90
+    payload.imported.clips[1].video.durationMs = 100
+    payload.imported.telemetry.samples = [
+      ...continuousGpsTrack(0, 2, 0, 50),
+      ...continuousGpsTrack(90, 3, 6000, 50)
+    ]
+    payload.imported.telemetry.videoDurationMs = payload.trimEndMs = 190
+    payload.startFinish = null
+    const projectPath = join(dir, 'short-chapters.gpo')
+    await saveProjectToFile(projectPath, payload)
+
+    expect((await loadProjectFromFile(projectPath)).imported.telemetry.samples).toEqual(payload.imported.telemetry.samples)
+  })
+
+  it('preserves already-cleaned GPS packets that spill across a video chapter boundary', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-persist-'))
+    dirs.push(dir)
+    const payload = makePayload(dir, 2)
+    payload.imported.clips[0].video.durationMs = 1990
+    payload.imported.clips[1].startOffsetMs = 1990
+    payload.imported.clips[1].video.durationMs = 2010
+    payload.imported.telemetry = stitchClipTelemetry([
+      { durationMs: 1990, telemetry: { ...payload.imported.telemetry, samples: continuousGpsTrack(0, 3), videoDurationMs: 1990 } },
+      { durationMs: 2010, telemetry: { ...payload.imported.telemetry, samples: continuousGpsTrack(0, 3, 6000), videoDurationMs: 2010 } }
+    ])
+    payload.trimEndMs = 4000
+    payload.startFinish = null
+    expect(payload.imported.telemetry.samples.map((s) => s.cts)).toEqual([0, 1000, 2000, 2990, 3990])
+    const projectPath = join(dir, 'packet-overlap.gpo')
+    await saveProjectToFile(projectPath, payload)
+
+    expect((await loadProjectFromFile(projectPath)).imported.telemetry).toEqual(payload.imported.telemetry)
   })
 
   it('throws a clear error naming which clip no longer exists', async () => {
@@ -273,5 +394,64 @@ describe('project persistence', () => {
     // "inherit"/the bundled default rather than failing to parse.
     expect(gpsWidget.fontFamily).toBeNull()
     expect(loaded.defaultFontFamily).toBe(FORMULA1_FONT_ID)
+  })
+
+  it.each(['missing', 'stale'])('rediscovers an LRV sidecar when its saved path is %s', async (savedPath) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-persist-'))
+    dirs.push(dir)
+    const sourcePath = join(dir, 'GH010230.MP4')
+    const lrvPath = join(dir, 'GL010230.LRV')
+    writeFileSync(sourcePath, 'not a real video')
+    writeFileSync(lrvPath, 'not a real lrv')
+
+    const payload = makePayload(dir)
+    payload.imported.clips[0].video = { ...makeVideoMeta(sourcePath), lrvPath: null }
+    const projectPath = join(dir, 'legacy.gpo')
+    await saveProjectToFile(projectPath, payload)
+    const legacy = JSON.parse(readFileSync(projectPath, 'utf8'))
+    if (savedPath === 'missing') delete legacy.clips[0].video.lrvPath
+    else legacy.clips[0].video.lrvPath = join(dir, 'missing.LRV')
+    writeFileSync(projectPath, JSON.stringify(legacy))
+
+    const loaded = await loadProjectFromFile(projectPath)
+    expect(loaded.imported.clips[0].video.lrvPath).toBe(lrvPath)
+  })
+
+  it('cleans legacy telemetry in memory and remaps corrections by time rather than shifted crossing index', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gpo-persist-'))
+    dirs.push(dir)
+    const payload = makePayload(dir)
+    const point = payload.imported.telemetry.samples[0]
+    payload.imported.telemetry.samples = [
+      { ...point, cts: 0, lat: 52 },
+      { ...point, cts: 1000 }, // old false crossing from a huge GPS snap
+      { ...point, cts: 2000, lat: 53 },
+      ...[0.0002, 0.00009, 0.0002, 0.0003].map((offset, i) => ({ ...point, cts: 20000 + 1000 * i, lat: 51.5 + offset }))
+    ]
+    payload.crossingAdjustmentsMs = { '0': 123, '1': 40 }
+    payload.ignoredCrossings = { '0': true, '1': true }
+    const projectPath = join(dir, 'legacy-gps.gpo')
+    await saveProjectToFile(projectPath, payload)
+    const legacy = JSON.parse(readFileSync(projectPath, 'utf8'))
+    delete legacy.crossingReferenceTimes
+    delete legacy.gpsTrackFilterVersion
+    writeFileSync(projectPath, JSON.stringify(legacy))
+    const cachePath = `${projectPath}.telemetry.json`
+    const cacheBefore = readFileSync(cachePath, 'utf8')
+    const projectBefore = readFileSync(projectPath, 'utf8')
+
+    const loaded = await loadProjectFromFile(projectPath)
+    expect(loaded.imported.telemetry.samples.map(s => s.cts)).toEqual([20000, 21000, 22000, 23000])
+    expect(loaded.crossingAdjustmentsMs).toEqual({ '0': 40 })
+    expect(loaded.ignoredCrossings).toEqual({ '0': true })
+    expect(readFileSync(cachePath, 'utf8')).toBe(cacheBefore)
+    expect(readFileSync(projectPath, 'utf8')).toBe(projectBefore)
+
+    const updatedPath = join(dir, 'updated.gpo')
+    await saveProjectToFile(updatedPath, loaded)
+    const reopened = await loadProjectFromFile(updatedPath)
+    expect(reopened.imported.telemetry).toEqual(loaded.imported.telemetry)
+    expect(reopened.crossingAdjustmentsMs).toEqual(loaded.crossingAdjustmentsMs)
+    expect(reopened.ignoredCrossings).toEqual(loaded.ignoredCrossings)
   })
 })
