@@ -2,8 +2,8 @@ import { CSSProperties, RefObject, useEffect, useRef, useState } from 'react'
 import { toAppVideoUrl } from '@shared/fileUrl'
 import { clipIndexAtGlobalMs, localMsWithinClip } from '@shared/timeline/clipTiming'
 import { useProjectStore } from '../store/projectStore'
-import { nextProxyStage, type ProxyStage } from './previewFallbackStage'
-import { canSyncMediaTime, createLatestSeekScheduler } from './latestSeekScheduler'
+import { initialPreviewSource, nextProxyStage, type ProxyStage } from './previewFallbackStage'
+import { canSyncMediaTime, createLatestSeekScheduler, isMediaSeekBusy } from './latestSeekScheduler'
 
 /** Imperative seek API -- Editor.tsx creates one ref and hands it to both VideoPlayer (which
  *  populates it) and Timeline (which calls it). A direct method call has no state to go stale,
@@ -11,6 +11,8 @@ import { canSyncMediaTime, createLatestSeekScheduler } from './latestSeekSchedul
  *  bookkeeping across an inherently async clip switch. */
 export interface PlayerApi {
   seekToGlobalMs(ms: number): void
+  /** Hold media ownership while Timeline previews a drag locally, without seeking or redrawing widgets. */
+  previewGlobalMs(ms: number): void
 }
 
 interface Props {
@@ -49,8 +51,8 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [transcodeProgress, setTranscodeProgress] = useState(0)
-  // Starts at the active clip's original file (full-res, no transcode); only swapped to a proxy
-  // path if native playback fails.
+  // Preview the original MP4 at source quality. The GoPro LRV sidecar and generated proxies remain
+  // available only if native playback reports a format/codec error; export always reads the MP4.
   const [srcPath, setSrcPath] = useState<string | null>(null)
 
   // Per-clip fallback-ladder position -- see previewFallbackStage.ts's nextProxyStage for why this
@@ -66,17 +68,34 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
   const resumeOnLoadRef = useRef(false)
   const seekSchedulerRef = useRef<ReturnType<typeof createLatestSeekScheduler> | null>(null)
   const applySeekRef = useRef<(ms: number) => void>(() => {})
+  // Chromium's native media pipeline can retain several random-access decode windows under a long
+  // drag, even when requests are rate-limited. During a scrub Timeline therefore owns its playhead
+  // preview locally; shared widget time stays fixed and exactly one decoder seek is submitted when
+  // the pointer is released.
+  const scrubPreviewRef = useRef(false)
 
   const activeClip = imported?.clips[activeClipIndex] ?? null
+  // The scheduler survives clip changes and appended imports, so its busy check must read the
+  // current resource rather than the one captured when the project was first opened.
+  const seekStateRef = useRef({ imported, activeClipIndex, loadState })
+  seekStateRef.current = { imported, activeClipIndex, loadState }
 
   // A full project replacement disposes queued work even when the old and new projects happen to
   // begin with the same video. Adding clips keeps the generation stable and preserves playback.
   useEffect(() => {
     const scheduler = createLatestSeekScheduler({
       apply: (ms) => applySeekRef.current(ms),
-      busy: () => {
+      busy: (ms) => {
         const el = videoRef.current
-        return !el || el.seeking || el.readyState < HTMLMediaElement.HAVE_METADATA || pendingSeekRef.current !== null
+        const state = seekStateRef.current
+        if (!el || !state.imported) return true
+        return isMediaSeekBusy({
+          targetIsActiveClip: clipIndexAtGlobalMs(state.imported.clips, ms) === state.activeClipIndex,
+          hasMetadata: el.readyState >= HTMLMediaElement.HAVE_METADATA,
+          mediaSeeking: el.seeking,
+          clipLoadPending: pendingSeekRef.current !== null,
+          mediaFailed: Boolean(el.error) || state.loadState === 'error'
+        })
       }
     })
     seekSchedulerRef.current = scheduler
@@ -89,6 +108,8 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     setActiveClipIndex(0)
     proxyStageRef.current = new Map()
     pendingSeekRef.current = null
+    scrubPreviewRef.current = false
+    resumeOnLoadRef.current = false
   }, [projectGeneration])
 
   // Single authoritative place that bumps `generationRef` -- fires whenever the active clip
@@ -98,7 +119,10 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
   useEffect(() => {
     generationRef.current += 1
     if (pendingSeekRef.current) pendingSeekRef.current.generation = generationRef.current
-    setSrcPath(activeClip ? activeClip.video.path : null)
+    const preview = activeClip ? initialPreviewSource(activeClip.video.path) : null
+    if (preview?.stage) proxyStageRef.current.set(activeClipIndex, preview.stage)
+    else proxyStageRef.current.delete(activeClipIndex)
+    setSrcPath(preview?.path ?? null)
     setLoadState('loading')
     setErrorMessage(null)
   }, [activeClipIndex, activeClip])
@@ -126,13 +150,17 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
       if (targetClipIndex === -1) return
       const targetClip = imported.clips[targetClipIndex]
       const targetLocalSec = localMsWithinClip(targetClip, ms) / 1000
-      // currentSrc guards the interval between changing clips and the new resource loading.
-      // Metadata is sufficient to seek, even if a stalled source never emits loadeddata.
+      // Publish committed navigation; pointer moves remain local to Timeline.
+      setCurrentTimeMs(ms)
+      // The DOM src attribute identifies the selected logical resource while a clip switch is in
+      // flight. Metadata is sufficient to seek, even if loadeddata is still pending.
+      const expectedSrc = toAppVideoUrl(srcPath ?? '')
       if (
         targetClipIndex === activeClipIndex &&
         el.readyState >= HTMLMediaElement.HAVE_METADATA &&
+        !el.seeking &&
         srcPath &&
-        el.currentSrc === toAppVideoUrl(srcPath)
+        (el.getAttribute('src') === expectedSrc || el.src === expectedSrc)
       ) {
         pendingSeekRef.current = null
         el.currentTime = targetLocalSec
@@ -144,9 +172,27 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     playerApiRef.current = {
       seekToGlobalMs(ms: number): void {
         if (!imported || !Number.isFinite(ms) || clipIndexAtGlobalMs(imported.clips, ms) === -1) return
-        // Widgets follow the latest requested time immediately, even while the decoder catches up.
+        scrubPreviewRef.current = false
+        resumeOnLoadRef.current = false
+        // Scrubbing is a deliberate user navigation action. Pausing first prevents playback and
+        // random-access seeks from competing for the same decoder, especially on a slow source.
+        const el = videoRef.current
+        if (el && !el.paused) el.pause()
+        // Publish the committed position immediately; the scheduler may need to wait for a previous
+        // media operation before it can safely apply the corresponding decoder seek.
         setCurrentTimeMs(ms)
         seekSchedulerRef.current?.request(ms)
+      },
+      previewGlobalMs(ms: number): void {
+        if (!imported || !Number.isFinite(ms) || clipIndexAtGlobalMs(imported.clips, ms) === -1) return
+        scrubPreviewRef.current = true
+        resumeOnLoadRef.current = false
+        seekSchedulerRef.current?.cancelPending()
+        const el = videoRef.current
+        if (el && !el.paused) el.pause()
+        // Deliberately do not update the shared currentTimeMs here. Timeline keeps its own cheap
+        // playhead preview during the gesture; publishing shared time would redraw every Canvas
+        // widget and retain native Skia resources even though the video frame itself is held still.
       }
     }
     return () => {
@@ -163,12 +209,27 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     // instead of moving smoothly. Drive a rAF loop while playing instead, for a per-frame update;
     // fall back to `seeked`/`pause` for the paused/scrubbing case where no rAF loop is running.
     let rafId: number | null = null
+    let videoFrameCallbackId: number | null = null
     const mediaMayOwnTimeline = (): boolean =>
       canSyncMediaTime(
         Boolean(seekSchedulerRef.current?.hasPending()),
         pendingSeekRef.current !== null,
-        el.seeking
+        el.seeking,
+        scrubPreviewRef.current
       )
+    const scheduleNextFrame = (): void => {
+      if (typeof el.requestVideoFrameCallback === 'function') {
+        videoFrameCallbackId = el.requestVideoFrameCallback(() => {
+          videoFrameCallbackId = null
+          tick()
+        })
+      } else {
+        rafId = requestAnimationFrame(() => {
+          rafId = null
+          tick()
+        })
+      }
+    }
     const tick = (): void => {
       const globalMs = activeClip.startOffsetMs + el.currentTime * 1000
       if (mediaMayOwnTimeline()) setCurrentTimeMs(globalMs)
@@ -176,15 +237,19 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
         el.pause()
         return
       }
-      rafId = requestAnimationFrame(tick)
+      scheduleNextFrame()
     }
     const startLoop = (): void => {
-      if (rafId === null) rafId = requestAnimationFrame(tick)
+      if (rafId === null && videoFrameCallbackId === null) scheduleNextFrame()
     }
     const stopLoop = (): void => {
       if (rafId !== null) {
         cancelAnimationFrame(rafId)
         rafId = null
+      }
+      if (videoFrameCallbackId !== null) {
+        el.cancelVideoFrameCallback(videoFrameCallbackId)
+        videoFrameCallbackId = null
       }
     }
 
@@ -202,21 +267,34 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
         setCurrentTimeMs(activeClip.startOffsetMs + el.currentTime * 1000)
       }
     }
-    const onSeeked = syncTime
+    const applyPendingSeek = (): void => {
+      const pending = pendingSeekRef.current
+      if (!pending || pending.generation !== generationRef.current || el.seeking ||
+        el.readyState < HTMLMediaElement.HAVE_METADATA || el.getAttribute('src') !== toAppVideoUrl(srcPath ?? '')) return
+      pendingSeekRef.current = null
+      el.currentTime = pending.targetSec
+    }
+    const onSeeked = (): void => {
+      applyPendingSeek()
+      syncTime()
+      seekSchedulerRef.current?.wake()
+    }
     const onLoadedData = (): void => {
       console.log('[video] loadeddata:', srcPath)
       setLoadState('ready')
 
-      const pending = pendingSeekRef.current
-      if (pending && pending.generation === generationRef.current) {
-        el.currentTime = pending.targetSec
-        pendingSeekRef.current = null
-      }
+      applyPendingSeek()
       if (resumeOnLoadRef.current) {
         resumeOnLoadRef.current = false
         el.play().catch((err) => console.error('[video] auto-resume into next clip failed:', err))
       }
       syncTime()
+      seekSchedulerRef.current?.wake()
+    }
+    const onLoadedMetadata = (): void => {
+      // A resource may never emit loadeddata until its requested frame is selected.
+      applyPendingSeek()
+      seekSchedulerRef.current?.wake()
     }
 
     // Advances to the next clip when one finishes during playback -- if this was the last clip,
@@ -291,6 +369,7 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
     el.addEventListener('play', onPlay)
     el.addEventListener('pause', onPause)
     el.addEventListener('seeked', onSeeked)
+    el.addEventListener('loadedmetadata', onLoadedMetadata)
     el.addEventListener('loadeddata', onLoadedData)
     el.addEventListener('ended', onEnded)
     el.addEventListener('error', onError)
@@ -300,6 +379,7 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
       el.removeEventListener('play', onPlay)
       el.removeEventListener('pause', onPause)
       el.removeEventListener('seeked', onSeeked)
+      el.removeEventListener('loadedmetadata', onLoadedMetadata)
       el.removeEventListener('loadeddata', onLoadedData)
       el.removeEventListener('ended', onEnded)
       el.removeEventListener('error', onError)
@@ -310,7 +390,14 @@ function VideoPlayer({ videoRef, style, playerApiRef }: Props): React.JSX.Elemen
 
   return (
     <>
-      <video ref={videoRef} src={toAppVideoUrl(srcPath)} className="video-stage__video" style={style} />
+      <video
+        ref={videoRef}
+        src={toAppVideoUrl(srcPath)}
+        className="video-stage__video"
+        style={style}
+        preload="metadata"
+        playsInline
+      />
       {loadState === 'loading' && (
         <div className="video-stage__status" style={style}>
           Loading preview…

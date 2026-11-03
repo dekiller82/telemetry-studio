@@ -518,6 +518,8 @@ export const projectFileSchema = z.object({
   clips: z.array(clipInfoSchema),
   /** Filename of the sibling telemetry cache JSON, relative to the project file's own directory. */
   telemetryCacheFile: z.string(),
+  /** Legacy caches are filtered in memory on load; current caches retain import output. */
+  gpsTrackFilterVersion: z.number().int().nonnegative().optional(),
   widgets: z.array(widgetSchema),
   /** One start/finish line shared by every widget that needs lap/sector detection. */
   startFinish: latLonSchema.nullable(),
@@ -527,6 +529,8 @@ export const projectFileSchema = z.object({
   /** Manual per-crossing time corrections for the startFinish point above -- see
    *  shared/types.ts's CrossingAdjustments. */
   crossingAdjustmentsMs: crossingAdjustmentsSchema,
+  /** Raw crossing timestamps anchor index-based corrections across GPS cleanup. */
+  crossingReferenceTimes: z.array(z.number()).optional(),
   /** Crossings manually deleted (a false lap detection) for the startFinish point above -- see
    *  shared/types.ts's CrossingIgnoreSet. */
   ignoredCrossings: ignoredCrossingsSchema,
@@ -569,9 +573,8 @@ const projectFileSchemaV1 = z.object({
  * just as a single-clip timeline with no trim. `hasAudio` isn't knowable from a v1 file without
  * re-probing the source (out of scope for a migration step); it's assumed `true` since that's the
  * overwhelmingly common case and the only consequence of a wrong guess is a slightly different
- * export audio-handling path, not a crash. `lrvPath` similarly isn't knowable without re-probing --
- * assumed absent (`null`), which just means the LRV-fallback preview tier is skipped for this clip,
- * same as any freshly-imported clip that genuinely has no sidecar proxy file.
+ * export audio-handling path, not a crash. `lrvPath` is initially absent (`null`) here; the file
+ * loader discovers a matching sidecar beside the original source after parsing.
  */
 export function parseProjectFile(raw: unknown): ProjectFile {
   const v2 = projectFileSchema.safeParse(raw)

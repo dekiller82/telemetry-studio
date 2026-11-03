@@ -1,5 +1,6 @@
 import type { TelemetrySample } from '../types'
 import { distanceMeters } from './laps'
+import { isGpsRangeContinuous } from './gpsContinuity'
 import { createMonotoneCubicInterpolant, findBracketIndex } from './interpolate'
 
 export interface LapDistanceCurve {
@@ -67,6 +68,7 @@ export function computeLapDistanceCurves(samples: TelemetrySample[], crossings: 
   for (let lapNumber = 1; lapNumber < crossings.length; lapNumber++) {
     const lapStartCts = crossings[lapNumber - 1]
     const lapEndCts = crossings[lapNumber]
+    if (!isGpsRangeContinuous(samples, lapStartCts, lapEndCts)) continue
     const startIdx = findBracketIndex(samples, lapStartCts)
     const endIdx = findBracketIndex(samples, lapEndCts)
     if (endIdx - startIdx < 1) continue
@@ -114,6 +116,9 @@ export function getDeltaStateAt(
     else break
   }
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
+  if (!isGpsRangeContinuous(samples, lapStartCts, cts)) {
+    return { deltaMs: null, baselineLapMs: null, predictedLapMs: null, ghostCts: null }
+  }
 
   const completedCurves = curves.filter((c) => c.lapEndCts <= cts)
   if (completedCurves.length === 0) {

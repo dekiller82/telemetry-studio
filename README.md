@@ -27,10 +27,20 @@ speedometer widgets running together over real footage.
   relying on whatever order the file picker happens to return. A clip with no GPS fix yet (commonly
   the very first chapter, started before the GPS module locked) no longer blocks the rest of the
   import — it just contributes a blank stretch on GPS-driven widgets for its own duration.
-- **Automatic GPS noise filtering** — physically-implausible GPS position jumps (a sudden snap
-  inconsistent with the reported speed) are detected and removed before they reach the map/track
-  widgets, bridging short isolated spikes and only discarding a longer bad stretch when a clearly
-  dominant, trustworthy segment remains.
+- **GPS continuity and noise filtering** — reject malformed timestamps and implausible position
+  jumps, remove unsupported reacquisition bursts, and preserve independently supported track
+  branches when neither dominates. Gaps longer than 2 seconds and implausible transitions split
+  the map and smoothing windows; they add no distance and produce no interpolated GPS readings.
+  Incomplete laps do not contribute lap/sector bests, fastest-lap selection, speed traces, or delta
+  and predicted-lap comparisons.
+- **Preview seeking on release** — the timeline playhead and trim handles use local drafts while
+  dragging. Release commits the trim/time and submits the latest seek; same-source decoder work
+  waits for the previous operation to settle. GPS map geometry and color caches are reused between
+  frames and rebuilt when their sampler, trim range, style, or dimensions change.
+- **Older project recovery** — reopening discovers missing or stale LRV sidecar paths beside the
+  source. Legacy GPS caches are cleaned in memory per chapter, with manual crossing nudges and
+  deleted-crossing decisions matched by original crossing timestamp. Saving records the filter
+  version and crossing references so cleaned caches reopen without repeated reclassification.
 - **18 widgets** (17 telemetry-driven, plus a freeform text/logo widget), each fully configurable
   (colors, fonts, size, smoothing) via the property panel — see [Widgets](#widgets) below for what
   each one shows and its own options.
@@ -319,7 +329,23 @@ flat sample-array format, and sampled at arbitrary timestamps through `Telemetry
 (`shared/telemetry/sampleAt.ts`), which both the live preview and the frame-by-frame export
 renderer use identically.
 
+In development only, an early bootstrap bounds React component/scheduler Performance entries by
+omitting their rich details and clearing those entries. Other Performance measurements retain
+their normal behavior; production does not install the guard. Detailed React component tracks in
+the browser Performance panel are consequently unavailable during ordinary development sessions.
+
 ## Known limitations
+
+- **Scrubbing holds the video frame and telemetry widgets until release.** The local timeline
+  playhead/trim draft moves during the gesture. Preview starts with the original MP4; LRV, remux,
+  and transcode fallbacks run only after a format/codec error. There is no timeout that forces
+  another seek into a busy decoder or automatically replaces a merely slow source. Navigation to
+  another chapter can replace a stalled old resource; this does not guarantee recovery of a stuck
+  decoder when only one chapter is available.
+- **GPS coverage is not accuracy.** The continuity and motion checks are conservative heuristics;
+  plausible position/speed errors can remain. Gaps are left blank rather than reconstructed, and
+  only timestamp-matched crossing corrections survive a changed detection list. Loading a legacy
+  project does not rewrite it or its telemetry cache; saving is required to persist migration.
 
 - **360° footage isn't supported yet.** The app assumes a flat rectilinear video frame; a raw 360
   file will import but won't be reprojected, so widgets will overlay on the unwrapped/fisheye

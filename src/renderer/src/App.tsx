@@ -532,7 +532,8 @@ function App(): React.JSX.Element {
   const fastestLap = useMemo(() => {
     if (!imported || !startFinish) return null
     return fastestLapRange(
-      detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings)
+      detectLapCrossings(imported.telemetry.samples, startFinish, startFinishRadiusM, undefined, crossingAdjustmentsMs, ignoredCrossings),
+      imported.telemetry.samples
     )
   }, [imported, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings])
 

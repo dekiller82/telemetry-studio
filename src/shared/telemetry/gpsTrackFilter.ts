@@ -1,5 +1,9 @@
 import type { TelemetrySample } from '../types'
-import { distanceMeters } from './laps'
+import { GPS_MOTION_LIMITS, isGpsTransitionPlausible, MAX_GPS_GAP_MS } from './gpsContinuity'
+export { isGpsTransitionPlausible } from './gpsContinuity'
+
+/** Saved projects with this version already contain filtered telemetry; do not classify it again. */
+export const GPS_TRACK_FILTER_VERSION = 1
 
 export interface GpsTrackFilterOptions {
   /** Consumer GPS can jump several metres while stationary; do not treat that as vehicle motion. */
@@ -18,10 +22,7 @@ export interface GpsTrackFilterOptions {
 }
 
 export const DEFAULT_GPS_TRACK_FILTER_OPTIONS: GpsTrackFilterOptions = {
-  positionToleranceM: 15,
-  speedMultiplier: 2,
-  speedSlackMps: 10,
-  absoluteMaxMps: 200,
+  ...GPS_MOTION_LIMITS,
   shortIslandMaxMs: 2_000,
   dominantShare: 0.8,
   minDominantDurationMs: 30_000
@@ -53,23 +54,6 @@ interface Segment {
  * The deliberately generous multiplier/slack keeps this a gross-outlier test, not a racing-line
  * smoother.
  */
-export function isGpsTransitionPlausible(
-  from: TelemetrySample,
-  to: TelemetrySample,
-  options: GpsTrackFilterOptions = DEFAULT_GPS_TRACK_FILTER_OPTIONS
-): boolean {
-  const dtSeconds = (to.cts - from.cts) / 1000
-  if (!Number.isFinite(dtSeconds) || dtSeconds <= 0) return false
-
-  const reportedSpeedMps = Math.max(0, from.speed2D, to.speed2D)
-  const allowedSpeedMps = Math.min(
-    options.absoluteMaxMps,
-    options.speedMultiplier * reportedSpeedMps + options.speedSlackMps
-  )
-  const allowedDistanceM = options.positionToleranceM + allowedSpeedMps * dtSeconds
-  return distanceMeters(from, to) <= allowedDistanceM
-}
-
 function splitAtImplausibleTransitions(samples: TelemetrySample[], options: GpsTrackFilterOptions): Segment[] {
   if (samples.length === 0) return []
 
@@ -89,6 +73,10 @@ function splitAtImplausibleTransitions(samples: TelemetrySample[], options: GpsT
 function segmentDurationMs(segment: Segment): number {
   if (segment.samples.length < 2) return 0
   return segment.samples[segment.samples.length - 1].cts - segment.samples[0].cts
+}
+
+function isSupportedSegment(segment: Segment): boolean {
+  return segment.samples.length >= 3 && segmentDurationMs(segment) >= 1_000
 }
 
 /**
@@ -111,9 +99,14 @@ function bridgeShortSpikeIslands(segments: Segment[], options: GpsTrackFilterOpt
 
     if (
       segmentDurationMs(island) <= options.shortIslandMaxMs &&
+      // A long gap cannot lend credibility to an isolated fix on either side. Both good runs
+      // need independent support before combining them across more than the continuity limit.
+      (rightFirst.cts - leftLast.cts <= MAX_GPS_GAP_MS || (isSupportedSegment(left) && isSupportedSegment(right))) &&
       isGpsTransitionPlausible(leftLast, rightFirst, options)
     ) {
       removed += island.samples.length
+      // Combine support for the good sides so branch selection preserves both. This does not
+      // connect them geometrically: canConnectGpsSamples still breaks any gap longer than 2s.
       working.splice(i - 1, 3, { samples: [...left.samples, ...right.samples] })
       i = Math.max(1, i - 1)
       continue
@@ -152,10 +145,31 @@ export function filterGpsTrack(
     }
   }
 
-  const initialSegments = splitAtImplausibleTransitions(samples, options)
+  // Old caches may contain malformed points or overlapping chapter timestamps. Preserve source
+  // order while dropping invalid entries; binary-search consumers require increasing cts.
+  let lastCts = -Infinity
+  const ordered = samples.filter((s) => {
+    if (![s.cts, s.lat, s.lon, s.altitude, s.speed2D, s.speed3D].every(Number.isFinite) ||
+      s.cts < 0 || s.cts <= lastCts || Math.abs(s.lat) > 90 || Math.abs(s.lon) > 180) return false
+    lastCts = s.cts
+    return true
+  })
+  if (!ordered.length) return { samples: [], report: { status: 'filtered', inputSamples: samples.length,
+    outputSamples: 0, removedSamples: samples.length, discontinuities: 0, segmentSizes: [], dominantShare: 0 } }
+  const initialSegments = splitAtImplausibleTransitions(ordered, options)
   const bridged = bridgeShortSpikeIslands(initialSegments, options)
-  const segments = bridged.segments
+  // A lock-reacquisition packet can advertise a good fix while still containing a run of
+  // impossible singleton positions. Remove these unsupported fragments independently of the
+  // dominant-branch heuristic. A lone short recording is not competing evidence and is kept.
+  const segments = bridged.segments.length > 1
+    ? bridged.segments.filter(isSupportedSegment)
+    : bridged.segments
   const spikeCleanedSamples = segments.flatMap((segment) => segment.samples)
+  if (segments.length === 0) {
+    return { samples: [], report: { status: 'filtered', inputSamples: samples.length,
+      outputSamples: 0, removedSamples: samples.length,
+      discontinuities: initialSegments.length - 1, segmentSizes: [], dominantShare: 0 } }
+  }
   const dominant = segments.reduce((best, segment) =>
     segment.samples.length > best.samples.length ? segment : best
   )

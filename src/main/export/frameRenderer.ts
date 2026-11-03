@@ -77,8 +77,8 @@ export async function createFrameRenderer(
   // Session Summary is an outro RECAP, not a live readout -- unlike lapState/sectorState per frame
   // below (which DO need to reflect that frame's own sampleCts), its data is the session's true
   // final totals, resolved once here rather than recomputed (and drifting) on every frame.
-  const finalLapState = crossings ? getLapStateAt(crossings, trimEndMs) : null
-  const finalSectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs) : null
+  const finalLapState = crossings ? getLapStateAt(crossings, trimEndMs, sampler.samples) : null
+  const finalSectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs, crossings ?? undefined) : null
   const finalSessionStats = sampler.sessionStatsAt(trimStartMs, trimEndMs)
   const sessionSummaryData = {
     totalLaps: finalLapState?.history.length ?? 0,
@@ -203,8 +203,8 @@ export async function createFrameRenderer(
       try {
         const dotPosition = sampler.positionAt(sampleCts)
         // Shared by every widget (the same global start/finish line), so resolved once per frame rather than per widget.
-        const lapState = crossings ? getLapStateAt(crossings, sampleCts) : null
-        const sectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, sampleCts) : null
+        const lapState = crossings ? getLapStateAt(crossings, sampleCts, sampler.samples) : null
+        const sectorState = sectorBoundaries ? getSectorStateAt(sectorBoundaries, sampleCts, crossings ?? undefined) : null
         const deltaState =
           crossings && lapDistanceCurves ? getDeltaStateAt(lapDistanceCurves, crossings, sampler.samples, sampleCts) : null
         // GPS Track's optional "ghost" marker -- shared across every gpsTrack widget instance, same as

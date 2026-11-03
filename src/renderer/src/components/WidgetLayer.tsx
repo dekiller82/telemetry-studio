@@ -52,10 +52,10 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
     () => (sampler && crossings ? computeLapSectors(sampler.samples, crossings) : null),
     [sampler, crossings]
   )
-  const lapState = useMemo(() => (crossings ? getLapStateAt(crossings, currentTimeMs) : null), [crossings, currentTimeMs])
+  const lapState = useMemo(() => (crossings ? getLapStateAt(crossings, currentTimeMs, sampler?.samples) : null), [crossings, currentTimeMs, sampler])
   const sectorState = useMemo(
-    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, currentTimeMs) : null),
-    [sectorBoundaries, currentTimeMs]
+    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, currentTimeMs, crossings ?? undefined) : null),
+    [sectorBoundaries, currentTimeMs, crossings]
   )
   const lapDistanceCurves = useMemo(
     () => (sampler && crossings ? computeLapDistanceCurves(sampler.samples, crossings) : null),
@@ -94,10 +94,10 @@ function WidgetLayer({ style, frameWidth, frameHeight, sampler, currentTimeMs }:
   // through the whole reveal window instead of visibly climbing as the video plays through its own
   // last few seconds. Only depends on trimStartMs/trimEndMs/crossings/sectorBoundaries, so this is
   // effectively a session-level constant, not something recomputed on every playback frame.
-  const finalLapState = useMemo(() => (crossings ? getLapStateAt(crossings, trimEndMs) : null), [crossings, trimEndMs])
+  const finalLapState = useMemo(() => (crossings ? getLapStateAt(crossings, trimEndMs, sampler?.samples) : null), [crossings, trimEndMs, sampler])
   const finalSectorState = useMemo(
-    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs) : null),
-    [sectorBoundaries, trimEndMs]
+    () => (sectorBoundaries ? getSectorStateAt(sectorBoundaries, trimEndMs, crossings ?? undefined) : null),
+    [sectorBoundaries, trimEndMs, crossings]
   )
   const sessionSummaryData: SessionSummaryData | null = useMemo(() => {
     if (!sampler) return null

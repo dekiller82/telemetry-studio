@@ -6,6 +6,7 @@ import type { TelemetrySampler } from '@shared/telemetry/sampleAt'
 import { useProjectStore } from '../store/projectStore'
 import { useWidgetStore } from '../store/widgetStore'
 import type { PlayerApi } from './VideoPlayer'
+import { createTrimDragSession, type TrimRange } from './trimDragSession'
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -14,10 +15,6 @@ interface Props {
 }
 
 const EDITABLE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
-/** Trim handles can't be dragged closer together than this -- keeps a degenerate zero-length
- *  export range from being reachable by accident. */
-const MIN_TRIM_GAP_MS = 200
-
 type DragMode = 'playhead' | 'trimStart' | 'trimEnd' | null
 
 function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element | null {
@@ -83,10 +80,10 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
     [imported]
   )
 
-  const fastestLap = useMemo(() => fastestLapRange(crossings), [crossings])
+  const fastestLap = useMemo(() => fastestLapRange(crossings, sampler?.samples), [crossings, sampler])
   // One entry per COMPLETED lap, index-aligned with crossings.slice(1) -- lapTimes[i] is the
   // duration of the lap that just finished at crossings[i + 1].
-  const lapTimes = useMemo(() => lapTimesFromCrossings(crossings), [crossings])
+  const lapTimes = useMemo(() => lapTimesFromCrossings(crossings, sampler?.samples), [crossings, sampler])
 
   const jumpToFastestLap = useCallback(() => {
     if (!fastestLap) return
@@ -102,6 +99,11 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
 
   const trackRef = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState<DragMode>(null)
+  // Timeline owns this lightweight visual preview while dragging. Shared project time is committed
+  // only on mouseup, so the video decoder and every Canvas widget each receive one update per
+  // gesture instead of one update per pointer movement.
+  const [dragPreviewMs, setDragPreviewMs] = useState<number | null>(null)
+  const [trimPreview, setTrimPreview] = useState<TrimRange | null>(null)
   const dragRafRef = useRef<number | null>(null)
   // Whichever element the CURRENT drag gesture actually started on -- the main scrub track and the
   // sparkline strip below it have different widths/offsets (the track is inset between the
@@ -120,9 +122,16 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
   }, [])
 
   const seekToRatio = useCallback(
-    (ratio: number) => {
+    (ratio: number, commit: boolean) => {
       if (!imported) return
-      playerApiRef.current?.seekToGlobalMs(ratio * totalDurationMs)
+      const ms = ratio * totalDurationMs
+      if (commit) {
+        setDragPreviewMs(null)
+        playerApiRef.current?.seekToGlobalMs(ms)
+      } else {
+        setDragPreviewMs(ms)
+        playerApiRef.current?.previewGlobalMs(ms)
+      }
     },
     [imported, playerApiRef, totalDurationMs]
   )
@@ -133,7 +142,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       e.preventDefault()
       dragSourceElementRef.current = trackRef.current
       setDragging('playhead')
-      seekToRatio(ratioFromClientX(e.clientX))
+      seekToRatio(ratioFromClientX(e.clientX), false)
     },
     [imported, ratioFromClientX, seekToRatio]
   )
@@ -143,6 +152,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       e.preventDefault()
       e.stopPropagation()
       dragSourceElementRef.current = trackRef.current
+      setTrimPreview(null)
       setDragging(which)
     }
   }, [])
@@ -215,7 +225,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       const rect = sparklineRef.current?.getBoundingClientRect()
       const ratio = rect && rect.width > 0 ? Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) : 0
       setDragging('playhead')
-      seekToRatio(ratio)
+      seekToRatio(ratio, false)
     },
     [imported, seekToRatio]
   )
@@ -223,46 +233,55 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
   useEffect(() => {
     if (!dragging) return
 
-    // rAF-throttled during the drag (cheap, keeps up with a fast mousemove burst); mouseup applies
-    // the release position synchronously instead of relying on a queued rAF, which mouseup's own
-    // cleanup (below) would cancel before it ever fires -- otherwise the final released position is
-    // silently dropped.
-    const applyDragAt = (clientX: number): void => {
+    const trimDrag = dragging === 'playhead' ? null : createTrimDragSession({
+      mode: dragging,
+      range: { trimStartMs, trimEndMs },
+      durationMs: totalDurationMs,
+      onPreview(range) {
+        setTrimPreview(range)
+        const ms = dragging === 'trimStart' ? range.trimStartMs : range.trimEndMs
+        setDragPreviewMs(ms)
+        playerApiRef.current?.previewGlobalMs(ms)
+      },
+      onCommit(range) {
+        setTrim(range.trimStartMs, range.trimEndMs)
+        setTrimPreview(null)
+        setDragPreviewMs(null)
+        playerApiRef.current?.seekToGlobalMs(dragging === 'trimStart' ? range.trimStartMs : range.trimEndMs)
+      }
+    })
+
+    // Only Timeline's lightweight playhead/trim draft changes during a drag. On release, publish
+    // the range and perform one native video seek; GPS caches keep their existing geometry until
+    // then, and scrubbing across GoPro chapters cannot build a queue of decoder work.
+    const applyDragAt = (clientX: number, commit: boolean): void => {
       const ratio = ratioFromClientX(clientX)
       const ms = ratio * totalDurationMs
       if (dragging === 'playhead') {
-        seekToRatio(ratio)
-      } else if (dragging === 'trimStart') {
-        const clampedMs = Math.min(ms, trimEndMs - MIN_TRIM_GAP_MS)
-        setTrim(clampedMs, trimEndMs)
-        // Seeks the video to the handle's own new position (not wherever the playhead already was)
-        // so you can see exactly where the trim will start/end while still dragging, same reasoning
-        // as the playhead branch just above -- previously only the trim mask/handle moved, the video
-        // itself stayed wherever it was.
-        playerApiRef.current?.seekToGlobalMs(clampedMs)
+        seekToRatio(ratio, commit)
       } else {
-        const clampedMs = Math.max(ms, trimStartMs + MIN_TRIM_GAP_MS)
-        setTrim(trimStartMs, clampedMs)
-        playerApiRef.current?.seekToGlobalMs(clampedMs)
+        if (commit) trimDrag?.commit(ms)
+        else trimDrag?.preview(ms)
       }
     }
 
     const onMouseMove = (e: MouseEvent): void => {
       if (dragRafRef.current !== null) cancelAnimationFrame(dragRafRef.current)
-      dragRafRef.current = requestAnimationFrame(() => applyDragAt(e.clientX))
+      dragRafRef.current = requestAnimationFrame(() => applyDragAt(e.clientX, false))
     }
     const onMouseUp = (e: MouseEvent): void => {
       if (dragRafRef.current !== null) {
         cancelAnimationFrame(dragRafRef.current)
         dragRafRef.current = null
       }
-      applyDragAt(e.clientX)
+      applyDragAt(e.clientX, true)
       setDragging(null)
     }
 
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
     return () => {
+      trimDrag?.cancel()
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
       if (dragRafRef.current !== null) cancelAnimationFrame(dragRafRef.current)
@@ -342,9 +361,12 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
   const selectedAdjustmentMs = selectedRawIndex !== null ? crossingAdjustmentsMs[String(selectedRawIndex)] ?? 0 : 0
   const selectedAdjustmentFrames = selectedFrameMs > 0 ? Math.round(selectedAdjustmentMs / selectedFrameMs) : 0
 
-  const pct = totalDurationMs ? Math.min(100, (currentTimeMs / totalDurationMs) * 100) : 0
-  const trimStartPct = totalDurationMs ? Math.min(100, (trimStartMs / totalDurationMs) * 100) : 0
-  const trimEndPct = totalDurationMs ? Math.min(100, (trimEndMs / totalDurationMs) * 100) : 100
+  const displayedTimeMs = dragPreviewMs ?? currentTimeMs
+  const pct = totalDurationMs ? Math.min(100, (displayedTimeMs / totalDurationMs) * 100) : 0
+  const displayedTrimStartMs = trimPreview?.trimStartMs ?? trimStartMs
+  const displayedTrimEndMs = trimPreview?.trimEndMs ?? trimEndMs
+  const trimStartPct = totalDurationMs ? Math.min(100, (displayedTrimStartMs / totalDurationMs) * 100) : 0
+  const trimEndPct = totalDurationMs ? Math.min(100, (displayedTrimEndMs / totalDurationMs) * 100) : 100
 
   return (
     <div className="timeline-wrapper">
@@ -368,7 +390,7 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
       >
         ⏭
       </button>
-      <span className="timeline__time">{formatTime(currentTimeMs, true)}</span>
+      <span className="timeline__time">{formatTime(displayedTimeMs, true)}</span>
       <button
         className="timeline__fastest-lap"
         onClick={jumpToFastestLap}
@@ -421,13 +443,13 @@ function Timeline({ videoRef, playerApiRef, sampler }: Props): React.JSX.Element
           className="timeline__trim-handle timeline__trim-handle--start"
           style={{ left: `${trimStartPct}%` }}
           onMouseDown={handleTrimHandleMouseDown('trimStart')}
-          title={`Trim start: ${formatTime(trimStartMs, true)}`}
+          title={`Trim start: ${formatTime(displayedTrimStartMs, true)}`}
         />
         <div
           className="timeline__trim-handle timeline__trim-handle--end"
           style={{ left: `${trimEndPct}%` }}
           onMouseDown={handleTrimHandleMouseDown('trimEnd')}
-          title={`Trim end: ${formatTime(trimEndMs, true)}`}
+          title={`Trim end: ${formatTime(displayedTrimEndMs, true)}`}
         />
       </div>
       <span className="timeline__time timeline__time--dim">{formatTime(totalDurationMs, true)}</span>

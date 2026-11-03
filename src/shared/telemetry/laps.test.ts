@@ -46,13 +46,14 @@ describe('detectLapCrossings', () => {
 
   it('requires minLapMs between crossings to avoid double-counting a slow wobble near the line', () => {
     const samples = [
-      makeSample(0, { lat: 51.51, lon: -0.1 }), // far (boundary sample, excluded from detection anyway)
+      makeSample(0, { lat: 51.5002, lon: -0.1 }), // 22m away
       makeSample(1000, { lat: 51.5, lon: -0.1 }), // at s/f: local min #1
-      makeSample(2000, { lat: 51.5005, lon: -0.1 }), // pulls away momentarily
+      makeSample(2000, { lat: 51.5002, lon: -0.1 }), // pulls away momentarily
       makeSample(3000, { lat: 51.5, lon: -0.1 }), // back at s/f: local min #2, too soon after #1 -> suppressed
-      makeSample(5000, { lat: 51.51, lon: -0.1 }), // far
+      makeSample(5000, { lat: 51.5002, lon: -0.1 }), // outside the detection radius
+      makeSample(29000, { lat: 51.5002, lon: -0.1 }), // signal has returned before the next pass
       makeSample(30000, { lat: 51.5, lon: -0.1 }), // at s/f: local min #3, well after #1 -> registers
-      makeSample(35000, { lat: 51.51, lon: -0.1 }) // far (padding so 30000 isn't a boundary sample)
+      makeSample(31000, { lat: 51.5002, lon: -0.1 }) // padding after the pass
     ]
     const crossings = detectLapCrossings(samples, startFinish, 20, 10000)
     expect(crossings).toEqual([1000, 30000])
@@ -256,8 +257,8 @@ describe('getLapStateAt', () => {
 
 describe('nearestLatLon', () => {
   it('returns the lat/lon of the nearest sample to the given time', () => {
-    const samples = [makeSample(0, { lat: 1, lon: 1 }), makeSample(1000, { lat: 2, lon: 2 }), makeSample(2000, { lat: 3, lon: 3 })]
-    expect(nearestLatLon(samples, 900)).toEqual({ lat: 2, lon: 2 })
+    const samples = [makeSample(0, { lat: 1, lon: 1 }), makeSample(1000, { lat: 1.0001, lon: 1 }), makeSample(2000, { lat: 1.0002, lon: 1 })]
+    expect(nearestLatLon(samples, 900)).toEqual({ lat: 1.0001, lon: 1 })
   })
 
   it('returns null for an empty sample list', () => {

@@ -1,5 +1,6 @@
 import type { TelemetrySample } from '../types'
 import { distanceMeters } from './laps'
+import { isGpsRangeContinuous } from './gpsContinuity'
 import { findBracketIndex } from './interpolate'
 
 export interface LapSpeedPoint {
@@ -23,6 +24,7 @@ export function computeLapSpeedTraces(samples: TelemetrySample[], crossings: num
   for (let lapNumber = 1; lapNumber < crossings.length; lapNumber++) {
     const lapStartCts = crossings[lapNumber - 1]
     const lapEndCts = crossings[lapNumber]
+    if (!isGpsRangeContinuous(samples, lapStartCts, lapEndCts)) continue
     const startIdx = findBracketIndex(samples, lapStartCts)
     const endIdx = findBracketIndex(samples, lapEndCts)
     if (endIdx - startIdx < 1) continue
@@ -57,6 +59,7 @@ export function computeCurrentLapSpeedTrace(samples: TelemetrySample[], crossing
     else break
   }
   const lapStartCts = idx >= 0 ? crossings[idx] : 0
+  if (!isGpsRangeContinuous(samples, lapStartCts, cts)) return null
   const lapNumber = Math.max(1, idx + 1)
 
   const startIdx = findBracketIndex(samples, lapStartCts)

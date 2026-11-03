@@ -9,6 +9,17 @@
  */
 export type ProxyStage = 'lrv' | 'remux' | 'transcode'
 
+export interface InitialPreviewSource {
+  path: string
+  /** The fallback stage already represented by `path`, if it is a sidecar/proxy. */
+  stage: ProxyStage | undefined
+}
+
+/** Start live preview from the original; proxies are only used after a playback format error. */
+export function initialPreviewSource(videoPath: string): InitialPreviewSource {
+  return { path: videoPath, stage: undefined }
+}
+
 /**
  * Decides the next tier to try after a format-error event, given what's already been tried for
  * this clip and whether an LRV sidecar is available. Returns null once every tier is exhausted.
