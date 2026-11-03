@@ -67,8 +67,19 @@ describe('export output ownership', () => {
     }
   })
 
-  it('keeps the private attempt extension compatible with ffmpeg MP4 muxer selection', () => {
-    expect(attemptOutputPath('C:/exports/lap.mp4', 'job', 2)).toBe('C:/exports/lap.mp4.telemetry-studio-job-2.tmp.mp4')
+  it.each(['lap.mp4', 'lap.v1', 'lap', 'lap.mov', 'lap.webm', 'lap.'])(
+    'uses MP4 for legacy and video requests regardless of destination name: %s', name => {
+      const output = `C:/exports/${name}`
+      const expected = `${output}.telemetry-studio-job-2.tmp.mp4`
+      expect(attemptOutputPath(output, 'job', 2)).toBe(expected)
+      expect(attemptOutputPath(output, 'job', 2, 'video')).toBe(expected)
+    }
+  )
+
+  it.each(['qtrle', 'prores4444'] as const)('uses MOV for %s requests regardless of destination name', format => {
+    for (const output of ['overlay.mov', 'overlay.MOV', 'overlay.v1', 'overlay.mp4', 'overlay']) {
+      expect(attemptOutputPath(output, 'job', 1, format)).toBe(`${output}.telemetry-studio-job-1.tmp.mov`)
+    }
   })
 
   it('restores an existing output when publishing the attempt fails', async () => {

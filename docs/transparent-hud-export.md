@@ -6,8 +6,10 @@
 2. Choose **Transparent HUD (MOV Animation)** or **Transparent HUD (ProRes 4444)** in the toolbar.
 3. Choose all widgets, or select one/multiple widgets in the canvas and choose **Selected widgets**.
 4. Export to a MOV file. Import the original GoPro footage separately into the editing application.
-5. Place the transparent file above the camera footage at Telemetry Studio's trim-start offset.
-   Its own first timestamp is zero; its full frame matches the source dimensions and frame rate.
+5. Place a trim-range export above the camera footage at the project's trim-start offset.
+   For **Export Best Lap**, use its separate padded lap-start offset shown in the banner,
+   clamped to the sequence start; this can differ from the project's trim start. The MOV's
+   own first timestamp is zero, and its full frame matches the source dimensions and frame rate.
 6. Group/link the two tracks before cutting or changing speed. Grade the camera clip separately.
 
 Transparent export ignores delivery downscaling/bitrate presets so its coordinates match the
