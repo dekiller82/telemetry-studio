@@ -8,7 +8,7 @@ import { createFrameRenderer } from './frameRenderer'
 import { selectVideoEncoder, CPU_ENCODER, type VideoEncoder } from './gpuEncoder'
 import { resolveUnpackedBinaryPath } from '../app/binaryPath'
 import { createExportJobId, ExportAttemptProfiler } from './exportProfiling'
-import { assertSafeExportOutput, attemptOutputPath, commitAttemptOutput, removeAttemptFile, ExportOutputRecoveryError } from './exportOutput'
+import { assertSafeExportOutput, assertTransparentOutputContainer, attemptOutputPath, commitAttemptOutput, removeAttemptFile, ExportOutputRecoveryError } from './exportOutput'
 import { ExportCancelledError } from './exportCancellation'
 import { InsufficientDiskSpaceError, isDiskFullError } from './exportDiskSpace'
 import { createExportProcessWaiter } from './exportProcessWaiter'
@@ -17,11 +17,14 @@ import { createParallelFrameRenderer, type ExportFrameSource, type RenderedFrame
 import { getExportFontsDirectory } from './registerFonts'
 import { getExportIconsDirectory } from './loadIcons'
 import { CUDA_DECODE_THREADS, probeCudaInput } from './inputDecode'
+import { buildTransparentOverlayArgs, transparentEncoder } from './transparentOverlay'
+import { DEFAULT_RENDER_WORKERS, type ExportFormat, type RenderWorkerCount } from '../../shared/export/overlayExport'
 
 export { ExportCancelledError } from './exportCancellation'
 export { InsufficientDiskSpaceError } from './exportDiskSpace'
 
 export interface ExportSettings {
+  format?: ExportFormat
   width: number
   height: number
   fps: number
@@ -36,8 +39,8 @@ export interface ExportSettings {
    *  stream-copyable single-clip/no-trim case) so the delivery preset's audio bitrate is actually
    *  applied. Undefined (the default export) leaves audio untouched, exactly as before. */
   audioBitrateKbps?: number
-  /** Default: two bounded render workers. Set 1 for serial A/B validation or troubleshooting. */
-  renderWorkers?: 1 | 2
+  /** Default: two bounded render workers; 1 selects the serial, lower-memory path. */
+  renderWorkers?: RenderWorkerCount
 }
 
 export interface RunExportOptions {
@@ -154,6 +157,9 @@ export function buildFfmpegArgs(
   outputPath: string,
   overlayRoi: OverlayRoi = { x: 0, y: 0, width: settings.width, height: settings.height }
 ): string[] {
+  if (settings.format && settings.format !== 'video') {
+    return buildTransparentOverlayArgs(settings, overlayRoi, totalFrames, settings.format, outputPath)
+  }
   // Only clips the trim range actually overlaps are fed to ffmpeg at all -- see
   // clipsOverlappingTrim's own doc comment for why including every clip regardless was a real
   // correctness/performance bug, not just wasteful. Every case below already handles "N clips"
@@ -478,7 +484,7 @@ async function runWithEncoder(
       profiler.recordRenderWait(performance.now() - waitStartedAtMs)
       queued.delete(frameIndex)
       const nextIndex = frameIndex + frameSource.prefetchCount
-      // Keep both workers busy while ffmpeg consumes the current frame. With only one renderer,
+      // Keep the workers busy while ffmpeg consumes the current frame. With only one renderer,
       // pre-rendering into the pipe wait did not improve throughput and retains another full RGBA
       // snapshot, so preserve the strictly serial, lower-memory path instead.
       if (frameSource.workerCount > 1 && nextIndex < totalFrames) enqueue(nextIndex)
@@ -644,12 +650,16 @@ export async function runExport(options: RunExportOptions): Promise<void> {
   const sourcePaths = clips.map((clip) => clip.video.path)
   // Protect every imported source, including chapters excluded by the current trim range.
   await assertSafeExportOutput(outputPath, sourcePaths)
+  if (settings.format && settings.format !== 'video') assertTransparentOutputContainer(outputPath)
   const resolvedFfmpegPath: string = ffmpegPath
   const jobId = createExportJobId()
 
   const totalFrames = Math.max(1, Math.round(((trimEndMs - trimStartMs) / 1000) * settings.fps))
   const encoderSelectionStartedAtMs = performance.now()
-  let encoder = await selectVideoEncoder(resolvedFfmpegPath, settings.preferGpu ?? true)
+  const transparent = settings.format !== undefined && settings.format !== 'video'
+  let encoder = settings.format && settings.format !== 'video'
+    ? transparentEncoder(settings.format)
+    : await selectVideoEncoder(resolvedFfmpegPath, settings.preferGpu ?? true)
   let decodeProbeStatus: 'not-run' | 'passed' | 'failed' = 'not-run'
   let decodeProbeFailure: string | null = null
   const decodeProbeStartedAtMs = performance.now()
@@ -677,6 +687,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
   const createFrameSource = async (): Promise<ExportFrameSource> => {
     if (useParallelRendering(settings, telemetry)) {
       try {
+        const workerCount = settings.renderWorkers ?? DEFAULT_RENDER_WORKERS
         return await createParallelFrameRenderer({
           width: settings.width,
           height: settings.height,
@@ -690,7 +701,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
           trimEndMs,
           defaultFontFamily,
           assetDirectories: { fonts: getExportFontsDirectory(), icons: getExportIconsDirectory() }
-        }, signal)
+        }, signal, workerCount === 1 ? 2 : workerCount)
       } catch (error) {
         if (signal?.aborted) throw new ExportCancelledError()
         console.warn('[export] parallel renderer unavailable; using one renderer:', error)
@@ -726,7 +737,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
   }
 
   const runAttempt = async (attemptEncoder: VideoEncoder, attemptId: number): Promise<void> => {
-    const tempOutputPath = attemptOutputPath(outputPath, jobId, attemptId)
+    const tempOutputPath = attemptOutputPath(outputPath, jobId, attemptId, settings.format)
     let frameSource: ExportFrameSource | null = null
     try {
       const rendererSetupStartedAtMs = performance.now()
@@ -774,7 +785,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
     // Only a typed ffmpeg failure containing a hardware-backend diagnostic is retryable. Render,
     // input, disk, and output-path errors must surface immediately instead of causing a full second
     // export that cannot fix the underlying problem.
-    if (!isRecoverableHardwareFailure(err, encoder)) throw err
+    if (transparent || !isRecoverableHardwareFailure(err, encoder)) throw err
     if (signal?.aborted) throw new ExportCancelledError()
     console.warn(`[export] ${encoder.label} hardware path failed, retrying with CPU encoder:`, err)
     onEncoderSelected?.(`${CPU_ENCODER.label} (fallback after ${encoder.label} failed)`)

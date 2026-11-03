@@ -81,6 +81,10 @@ speedometer widgets running together over real footage.
   with crash recovery.
 - **Export just your fastest lap** as its own short clip, with configurable padding (seconds
   before/after) — doesn't touch your project's actual saved trim range.
+- **Transparent HUD export** — choose Animation or ProRes 4444 MOV, containing all widgets or
+  only the selected widgets, at source dimensions and frame rate without camera video or audio.
+  Both retain alpha for compositing above separately graded footage in another editor.
+  See [transparent HUD export](docs/transparent-hud-export.md) for timing, colour and alpha setup.
 - **Delivery presets** — a dropdown next to Export Video bundles resolution + bitrate for YouTube
   (4K/1080p), Instagram/TikTok/Reels, and Twitter/X, alongside the default native-resolution
   "Source quality" export. A warning appears (with a one-click switch to the 4K preset) if your
@@ -108,11 +112,16 @@ speedometer widgets running together over real footage.
   (NVIDIA NVENC, Intel Quick Sync, AMD AMF) before trusting it, falling back to CPU (libx264) if
   none is available or the GPU encoder fails partway through. See [GPU acceleration](#gpu-acceleration)
   below for exactly what's accelerated on which vendor.
-- **Bounded export rendering** — two background workers generate HUD frames in order, with one
-  outstanding frame per worker and FFmpeg backpressure. Static layers and eligible speed graphs
-  are cached, and the transparent overlay is cropped when its bounds can be safely determined.
-  Cancellation preserves an existing destination, and an export cannot replace an imported source.
-  See [export performance and diagnostics](docs/export-performance.md) for measurements and limits.
+- **Bounded export rendering** — choose **1, 2, 3 or 4 workers** under **File → Export rendering**.
+  The default remains **2**, and the choice is remembered locally for ordinary, best-lap and
+  transparent exports. One worker uses the serial, lower-memory path; parallel exports keep one
+  outstanding request per worker and submit frames to FFmpeg in order, with backpressure.
+  Static layers and eligible speed graphs are cached, and the overlay is cropped when its bounds
+  can be safely determined. Worker initialization failure falls back to one renderer. More workers
+  use more memory and do not guarantee faster export; four-worker real-media throughput and peak
+  memory have not been measured. Cancellation preserves an existing destination, and an export
+  cannot replace an imported source. See [export performance and diagnostics](docs/export-performance.md)
+  for the existing measurements and limits.
 
 ## Widgets
 
@@ -272,9 +281,23 @@ electron-builder for the parts that need Apple's own tooling (codesigning, DMG c
 [release workflow](.github/workflows/release.yml) builds all three platforms natively in CI via a
 GitHub Actions matrix, triggered by pushing a `v*.*.*` tag.
 
+## Transparent HUD export
+
+The export-content selector offers **Transparent HUD (MOV Animation)** and **Transparent HUD
+(ProRes 4444)**. Choose all widgets or the selected widgets, then export to a `.mov` file.
+Delivery downscaling and bitrate presets are ignored so the HUD matches the source dimensions,
+frame rate and widget coordinates. The MOV begins at timestamp zero and contains no camera video
+or audio. Place it above the source at the exported range's start, including any best-lap padding.
+
+Both formats use straight alpha and sRGB transfer with BT.709 primaries. Animation preserves RGB;
+ProRes 4444 is a high-quality YUV intermediate with alpha. Grade the camera footage separately and
+interpret the HUD as sRGB graphics. Both codecs encode on the CPU; a transparent export failure
+is reported without switching to opaque H.264. See [transparent HUD export](docs/transparent-hud-export.md)
+for editor setup, cancellation behavior and validation limits.
+
 ## GPU acceleration
 
-Export runs everything through ffmpeg. On startup of each export, `selectVideoEncoder` (see
+Combined video + HUD MP4 export runs everything through ffmpeg. On startup of each export, `selectVideoEncoder` (see
 [`src/main/export/gpuEncoder.ts`](src/main/export/gpuEncoder.ts)) tries, in order:
 
 1. **NVIDIA NVENC** (`h264_nvenc`) — GPU encode. CUDA decode is enabled after a separate probe
