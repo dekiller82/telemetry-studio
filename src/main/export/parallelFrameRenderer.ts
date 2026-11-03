@@ -28,9 +28,9 @@ interface WorkerSlot {
   rejectReady(error: Error): void
 }
 
-/** Two renderers run independently; only one frame per worker may be outstanding. */
-export async function createParallelFrameRenderer(data: FrameWorkerData, signal?: AbortSignal): Promise<ExportFrameSource> {
-  const workerCount = 2
+/** Renderers run independently; only one frame per worker may be outstanding. */
+export async function createParallelFrameRenderer(data: FrameWorkerData, signal?: AbortSignal, workerCount: 2 | 3 | 4 = 2): Promise<ExportFrameSource> {
+  if (workerCount !== 2 && workerCount !== 3 && workerCount !== 4) throw new RangeError('Parallel rendering requires two, three or four workers')
   const roi = computeOverlayRoi(data.width, data.height, data.widgets)
   const pending = new Map<number, PendingFrame>()
   const slots: WorkerSlot[] = []

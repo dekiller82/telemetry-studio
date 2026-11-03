@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import type { OverlayExportRequest } from '../shared/export/overlayExport'
 import type { ImportResult, ProjectPayload, ImportProgress, VideoMeta, WidgetInstance, WidgetLayoutPreset, RecentProject, UpdateCheckResult } from '../shared/types'
 
 export interface ExportProgress {
@@ -18,8 +19,8 @@ const api = {
   loadProject: (): Promise<ProjectPayload | null> => ipcRenderer.invoke('project:load'),
   loadProjectFromPath: (projectPath: string): Promise<ProjectPayload> => ipcRenderer.invoke('project:load-path', projectPath),
   listRecentProjects: (): Promise<RecentProject[]> => ipcRenderer.invoke('recent:list'),
-  exportVideo: (payload: ProjectPayload, deliveryPresetId?: string): Promise<string | null> =>
-    ipcRenderer.invoke('export:start', payload, deliveryPresetId),
+  exportVideo: (payload: ProjectPayload, deliveryPresetId?: string, request?: OverlayExportRequest): Promise<string | null> =>
+    ipcRenderer.invoke('export:start', payload, deliveryPresetId, request),
   cancelExport: (): Promise<void> => ipcRenderer.invoke('export:cancel'),
   listLayoutPresets: (): Promise<WidgetLayoutPreset[]> => ipcRenderer.invoke('layouts:list'),
   saveLayoutPreset: (name: string, widgets: WidgetInstance[]): Promise<WidgetLayoutPreset[]> =>

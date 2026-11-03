@@ -1,6 +1,7 @@
 import { realpath, rename, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { throwIfExportCancelled } from './exportCancellation'
+import type { ExportFormat } from '../../shared/export/overlayExport'
 
 /** Recovery must be reported even when cancellation triggered it; the user may need the backup. */
 export class ExportOutputRecoveryError extends Error {
@@ -65,9 +66,17 @@ export async function removeAttemptFile(filePath: string): Promise<void> {
   }
 }
 
-export function attemptOutputPath(outputPath: string, jobId: string, attemptId: number): string {
-  // Keep the final .mp4 extension so ffmpeg selects the same muxer as the user-facing output.
-  return `${outputPath}.telemetry-studio-${jobId}-${attemptId}.tmp.mp4`
+export function attemptOutputPath(outputPath: string, jobId: string, attemptId: number, format: ExportFormat = 'video'): string {
+  // The request determines the muxer, regardless of the user's destination suffix.
+  // Legacy callers still encode ordinary MP4 video.
+  const extension = format === 'video' ? '.mp4' : '.mov'
+  return `${outputPath}.telemetry-studio-${jobId}-${attemptId}.tmp${extension}`
+}
+
+export function assertTransparentOutputContainer(outputPath: string): void {
+  if (path.extname(outputPath).toLowerCase() !== '.mov') {
+    throw new Error('Transparent HUD exports require a .mov file name. Choose a MOV output file.')
+  }
 }
 
 /**

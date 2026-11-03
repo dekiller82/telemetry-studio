@@ -11,9 +11,11 @@ import { detectLapCrossings, fastestLapRange } from '@shared/telemetry/laps'
 import { formatTime } from '@shared/format'
 import { DELIVERY_PRESETS, SOURCE_QUALITY_PRESET_ID, findDeliveryPreset } from '@shared/export/deliveryPresets'
 import type { ImportProgress, ProjectPayload, RecentProject, UpdateCheckResult } from '@shared/types'
+import { DEFAULT_RENDER_WORKERS, renderWorkerCountSchema, type ExportFormat, type RenderWorkerCount } from '@shared/export/overlayExport'
 
 const LAST_SEEN_VERSION_KEY = 'gpo-last-seen-version'
 const DISMISSED_UPDATE_VERSION_KEY = 'gpo-dismissed-update-version'
+const RENDER_WORKERS_KEY = 'gpo-export-render-workers'
 const EDITABLE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
 
 const IMPORT_PHASE_LABELS: Record<ImportProgress['phase'], string> = {
@@ -129,6 +131,7 @@ function App(): React.JSX.Element {
   const setDefaultFontFamily = useProjectStore((s) => s.setDefaultFontFamily)
   const setIsExporting = useProjectStore((s) => s.setIsExporting)
   const widgets = useWidgetStore((s) => s.widgets)
+  const selectedWidgetIds = useWidgetStore((s) => s.selectedIds)
   const loadWidgets = useWidgetStore((s) => s.loadWidgets)
   const resetWidgets = useWidgetStore((s) => s.reset)
   const undo = useWidgetStore((s) => s.undo)
@@ -157,10 +160,23 @@ function App(): React.JSX.Element {
   // "no delivery preset," so window.api.exportVideo gets undefined and behaves exactly as before
   // this control existed (native resolution, quality-based CRF encode).
   const [exportPresetId, setExportPresetId] = useState<string>(SOURCE_QUALITY_PRESET_ID)
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('video')
+  const [overlayScope, setOverlayScope] = useState<'all' | 'selected'>('all')
+  const [renderWorkers, setRenderWorkers] = useState<RenderWorkerCount>(() => {
+    try {
+      const saved = renderWorkerCountSchema.safeParse(Number(localStorage.getItem(RENDER_WORKERS_KEY)))
+      return saved.success ? saved.data : DEFAULT_RENDER_WORKERS
+    } catch { return DEFAULT_RENDER_WORKERS }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(RENDER_WORKERS_KEY, String(renderWorkers)) } catch { /* Export remains available if preferences cannot be saved. */ }
+  }, [renderWorkers])
+  const overlayRequest = { format: exportFormat, renderWorkers, widgetIds: exportFormat !== 'video' && overlayScope === 'selected' ? selectedWidgetIds : undefined }
+  const hasEmptyOverlaySelection = exportFormat !== 'video' && overlayScope === 'selected' && selectedWidgetIds.length === 0
   // Shown in the Export Best Lap panel so which preset it'll use isn't a silent, easy-to-miss
   // dependency on the toolbar dropdown -- especially now that dropdown lives one File-menu click
   // away rather than always visible.
-  const activePresetLabel = exportPresetId === SOURCE_QUALITY_PRESET_ID ? 'Source quality' : (findDeliveryPreset(exportPresetId)?.label ?? 'Source quality')
+  const activePresetLabel = exportFormat === 'qtrle' ? 'Transparent MOV (Animation)' : exportFormat === 'prores4444' ? 'Transparent MOV (ProRes 4444)' : exportPresetId === SOURCE_QUALITY_PRESET_ID ? 'Source quality' : (findDeliveryPreset(exportPresetId)?.label ?? 'Source quality')
   // A real user's GoPro 5.3K (5312x2988) source crashed "Source quality" export outright (Electron's
   // "reply was never sent" -- the main process itself dying mid-export, not a hang); switching to a
   // preset that downscales below 4K fixed it for them. Root cause not pinned down (no way to
@@ -511,7 +527,8 @@ function App(): React.JSX.Element {
     try {
       const path = await window.api.exportVideo(
         { imported, widgets, startFinish, startFinishRadiusM, crossingAdjustmentsMs, ignoredCrossings, trimStartMs, trimEndMs, defaultFontFamily },
-        exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId
+        exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId,
+        overlayRequest
       )
       if (wasCancelledRef.current) return
       setExportState(path ? { phase: 'done', path } : { phase: 'idle' })
@@ -539,14 +556,16 @@ function App(): React.JSX.Element {
   const [showBestLapExportForm, setShowBestLapExportForm] = useState(false)
   const [bestLapPaddingBeforeSec, setBestLapPaddingBeforeSec] = useState(5)
   const [bestLapPaddingAfterSec, setBestLapPaddingAfterSec] = useState(5)
+  // Share the padded start between the request and the HUD alignment instructions.
+  const bestLapTrimStartMs = fastestLap ? Math.max(0, fastestLap.startCts - bestLapPaddingBeforeSec * 1000) : null
 
   // Exports just the fastest lap (plus configurable padding) as its own clip -- builds a ProjectPayload
   // with an OVERRIDDEN trim range for this one export only, never touching the user's actual saved
   // trim, same "one-shot payload, no mutation" approach as any other export.
   async function handleExportBestLap(): Promise<void> {
-    if (!imported || widgets.length === 0 || !fastestLap) return
+    if (!imported || widgets.length === 0 || !fastestLap || bestLapTrimStartMs === null) return
     const totalDurationMs = imported.telemetry.videoDurationMs
-    const clipTrimStartMs = Math.max(0, fastestLap.startCts - bestLapPaddingBeforeSec * 1000)
+    const clipTrimStartMs = bestLapTrimStartMs
     const clipTrimEndMs = Math.min(totalDurationMs, fastestLap.endCts + bestLapPaddingAfterSec * 1000)
     setShowBestLapExportForm(false)
     setExportEncoderLabel(null)
@@ -567,7 +586,8 @@ function App(): React.JSX.Element {
           trimEndMs: clipTrimEndMs,
           defaultFontFamily
         },
-        exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId
+        exportPresetId === SOURCE_QUALITY_PRESET_ID ? undefined : exportPresetId,
+        overlayRequest
       )
       if (wasCancelledRef.current) return
       setExportState(path ? { phase: 'done', path } : { phase: 'idle' })
@@ -675,7 +695,7 @@ function App(): React.JSX.Element {
                       setShowBestLapExportForm((v) => !v)
                       closeMenu()
                     }}
-                    disabled={widgets.length === 0 || !fastestLap}
+                    disabled={widgets.length === 0 || !fastestLap || hasEmptyOverlaySelection}
                     title={
                       !fastestLap
                         ? 'No completed lap yet -- set a start/finish line and complete at least one lap'
@@ -693,6 +713,16 @@ function App(): React.JSX.Element {
                   >
                     Project Settings…
                   </button>
+                  <label className="toolbar-menu__field">
+                    <span>Export rendering</span>
+                    <select aria-label="Export render workers" value={renderWorkers} disabled={isExporting}
+                      onChange={(e) => setRenderWorkers(renderWorkerCountSchema.parse(Number(e.target.value)))}>
+                      <option value={1}>1 worker · lower memory</option>
+                      <option value={2}>2 workers</option>
+                      <option value={3}>3 workers</option>
+                      <option value={4}>4 workers · higher memory</option>
+                    </select>
+                  </label>
                   <button
                     className="toolbar-menu__item"
                     onClick={() => {
@@ -705,11 +735,19 @@ function App(): React.JSX.Element {
                 </>
               )}
             </ToolbarMenu>
+            <select className="export-preset-select" aria-label="Export content" value={exportFormat} onChange={(e) => setExportFormat(e.target.value as ExportFormat)} disabled={isExporting}>
+              <option value="video">Video + HUD (MP4)</option>
+              <option value="qtrle">Transparent HUD (MOV Animation)</option>
+              <option value="prores4444">Transparent HUD (ProRes 4444)</option>
+            </select>
+            {exportFormat !== 'video' && <select className="export-preset-select" aria-label="HUD export selection" value={overlayScope} onChange={(e) => setOverlayScope(e.target.value as 'all' | 'selected')} disabled={isExporting}>
+              <option value="all">All widgets</option><option value="selected">Selected widgets ({selectedWidgetIds.length})</option>
+            </select>}
             <select
               className="export-preset-select"
               value={exportPresetId}
               onChange={(e) => setExportPresetId(e.target.value)}
-              disabled={isExporting}
+              disabled={isExporting || exportFormat !== 'video'}
               title="Delivery preset -- resolution/bitrate bundled for a specific platform. Source quality keeps the video at its native resolution."
             >
               <option value={SOURCE_QUALITY_PRESET_ID}>Source quality</option>
@@ -722,14 +760,22 @@ function App(): React.JSX.Element {
             <button
               className="import-button"
               onClick={handleExport}
-              disabled={isExporting || widgets.length === 0}
+              disabled={isExporting || widgets.length === 0 || hasEmptyOverlaySelection}
               title={widgets.length === 0 ? 'Add at least one widget before exporting' : undefined}
             >
-              {isExporting ? 'Exporting…' : 'Export Video'}
+              {isExporting ? 'Exporting…' : exportFormat === 'video' ? 'Export Video' : 'Export HUD'}
             </button>
           </div>
         </header>
-        {isVeryHighResSource && exportPresetId === SOURCE_QUALITY_PRESET_ID && referenceVideo && (
+        {exportFormat !== 'video' && <div className="export-banner">
+          Transparent HUD only, at source size and frame rate, without audio.{' '}
+          Trim-range export: place it above the original video at {formatTime(trimStartMs, true)}.{' '}
+          {bestLapTrimStartMs !== null && <>
+            Export Best Lap: place it at {formatTime(bestLapTrimStartMs, true)} (lap start minus {bestLapPaddingBeforeSec} s leading padding, clamped to the sequence start).{' '}
+          </>}
+          Grade the video separately and keep both layers aligned when cutting or retiming. SDR graphics; check colour management for HDR projects.
+        </div>}
+        {exportFormat === 'video' && isVeryHighResSource && exportPresetId === SOURCE_QUALITY_PRESET_ID && referenceVideo && (
           <div className="export-banner export-banner--warning">
             This clip's native resolution ({referenceVideo.width}x{referenceVideo.height}) is unusually high and
             has caused Export to crash on some systems. If Export fails, try a delivery preset instead of Source
@@ -767,7 +813,7 @@ function App(): React.JSX.Element {
               />
               <span>s after</span>
             </label>
-            <button className="import-button" onClick={handleExportBestLap}>
+            <button className="import-button" onClick={handleExportBestLap} disabled={isExporting || hasEmptyOverlaySelection}>
               Export
             </button>
             <button className="import-button import-button--ghost" onClick={() => setShowBestLapExportForm(false)}>
