@@ -81,8 +81,9 @@ export function getBroadcastTimingFrame(
   const colours: SectorColour[] = [0, 1, 2].map((index) => {
     if (!display || index >= completed) return 'pending'
     const at = checkpoints(display)[index]
-    const previous = boundaries.filter((b) => !b.isOutLap && !b.excluded && b !== display && Number.isFinite(checkpoints(b)[index]) &&
-      checkpoints(b)[index] <= (b.validUntilCts ?? Infinity) && (index !== 2 || usable(b)) && checkpoints(b)[index] < at)
+    // A usable prefix can show its own checkpoint, but a GPS-invalid completed lap must never
+    // supply the historical benchmark for a later lap's colour.
+    const previous = valid.filter((b) => b !== display && checkpoints(b)[index] < at)
     if (!previous.length) return 'white'
     // With one driver, session best and personal best coincide. Never invent a second driver.
     return sectors(display)[index] <= Math.min(...previous.map((b) => sectors(b)[index])) ? 'purple' : 'yellow'

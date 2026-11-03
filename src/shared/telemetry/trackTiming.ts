@@ -251,13 +251,22 @@ export function getTrackSectorStateAt(model: TrackTimingModel, cts: number): Sec
   if (model.error) return model.referenceLapNumber === null && model.crossings.length
     ? getSectorStateAt([], cts, model.crossings) : null
   const lap = lapAt(model, cts)
-  if (lap && (cts > lap.validUntil || !lap.times.length)) return null
+  if (lap && (cts > lap.validUntil || !lap.times.length)) {
+    // The GPS comparison is unavailable, but detected crossings still provide an ordinary
+    // running clock. Preserve completed valid results without exposing this invalid lap's splits.
+    const completed = model.boundaries.filter((b) => b.complete !== false && b.lapEndCts <= cts)
+    return { ...getSectorStateAt(completed, cts, model.crossings), currentLapExcluded: lap.excluded }
+  }
   return getSectorStateAt(model.boundaries, cts, model.crossings)
 }
 
 /** Recap totals remain available even when the video ends in a stopped or GPS-invalid interval. */
 export function getTrackSectorSummaryAt(model: TrackTimingModel, cts: number): SectorState | null {
-  return model.error ? null : getSectorStateAt(model.boundaries, cts, model.crossings)
+  if (model.error) return null
+  // Keep completed eligible results and currently valid partial checkpoints. Once an invalid
+  // interval's validity expires, its earlier S1/S2 must not become the recap's sector bests.
+  const summaryBoundaries = model.boundaries.filter((b) => b.complete !== false || cts <= (b.validUntilCts ?? Infinity))
+  return getSectorStateAt(summaryBoundaries, cts, model.crossings)
 }
 
 export function getTrackDeltaStateAt(model: TrackTimingModel, cts: number): DeltaState {

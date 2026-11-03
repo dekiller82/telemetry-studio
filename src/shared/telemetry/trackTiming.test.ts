@@ -141,6 +141,29 @@ describe('shared fixed-position track timing', () => {
       expect(best).toBeGreaterThan(0)
     }
   })
+  it('drops fast sectors from an expired GPS-invalid final interval while preserving completed bests', () => {
+    const data = sequence(circle(0), circle(60_000, 45_000))
+      .filter(s => s.cts <= 83_000 || s.cts >= 90_000)
+    const model = computeTrackTiming(data, [0, 60_000])
+    expect(model.laps[1].reason).toBe('gps-gap')
+    // Before the gap, the current partial lap's valid checkpoint is available.
+    expect(getTrackSectorSummaryAt(model, 80_000)?.bestS1Ms).toBeCloseTo(15_000, -1)
+    // After validity expires, only the earlier valid complete lap supplies recap bests.
+    const summary = getTrackSectorSummaryAt(model, 94_000)!
+    expect(summary.lastLap?.lapNumber).toBe(1)
+    expect(summary.bestS1Ms).toBeCloseTo(20_000, -1)
+    expect(summary.bestS2Ms).toBeCloseTo(20_000, -1)
+    expect(summary.bestS3Ms).toBeCloseTo(20_000, -1)
+    const fallback = getTrackSectorStateAt(model, 94_000)!
+    expect(fallback.lastLap?.lapNumber).toBe(1)
+    expect(fallback.currentSectorElapsedMs).toBe(34_000)
+    expect(fallback.currentLapS1Ms).toBeNull()
+    expect(fallback.currentLapS2Ms).toBeNull()
+    expect(getTrackDeltaStateAt(model, 94_000).deltaMs).toBeNull()
+    expect(getBroadcastTimingFrame(fallback.broadcast!, 5, 3)).toMatchObject({
+      elapsedMs: 34_000, resultMs: null, colours: ['pending', 'pending', 'pending']
+    })
+  })
 
   it('geometry and current progress do not depend on the eventual length of the current lap', () => {
     const normal = computeTrackTiming(samples, crossings)

@@ -52,6 +52,23 @@ describe('broadcast sector timeline', () => {
     expect(invalid.colours).toEqual(['pending', 'pending', 'pending'])
     expect(invalid.elapsedMs).toBe(10000)
   })
+  it.each([0, 1])('excludes GPS-invalid historical laps from sector %i colour benchmarks', index => {
+    const valid = lap(1, 0, 20_000, 20_000, 20_000)
+    const invalid = { ...lap(2, 60_000, 15_000, 15_000, 15_000), complete: false, validUntilCts: 92_000 }
+    const current = lap(3, 105_000, 18_000, 18_000, 18_000)
+    const cts = (index === 0 ? current.s1Cts : current.s2Cts) + 100
+    const frame = getBroadcastTimingFrame({ cts, boundaries: [valid, invalid, current], crossings: [0, 60_000, 105_000, 159_000] }, 5, 3)
+    expect(frame.colours[index]).toBe('purple')
+    expect(frame.referenceLap).toBe(1)
+  })
+  it('keeps current partial-lap results available without treating invalid earlier laps as a benchmark', () => {
+    const invalid = { ...lap(1, 0, 15_000, 15_000, 15_000), complete: false, validUntilCts: 32_000 }
+    const current = { ...lap(2, 45_000, 18_000, 18_000, 18_000), complete: false, lapEndCts: Infinity }
+    const frame = getBroadcastTimingFrame({ cts: current.s1Cts + 100, boundaries: [invalid, current], crossings: [0, 45_000] }, 5, 3)
+    expect(frame.resultMs).toBe(18_000)
+    expect(frame.referenceLap).toBeNull()
+    expect(frame.colours[0]).toBe('white')
+  })
   it('formats rollover and negative sub-millisecond differences without a negative zero', () => {
     expect(formatBroadcastTime(59999.6)).toBe('1:00.000')
     expect(formatBroadcastTime(59999.6, true)).toBe('0:59.9')
