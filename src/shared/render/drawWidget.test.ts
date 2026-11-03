@@ -3,6 +3,11 @@ import type { Canvas2DLike, CanvasImageLike } from './canvas2d'
 import { drawWidget, type WidgetDrawContext } from './drawWidget'
 import { createWidget } from '../widgets/defaults'
 import { prepareGpsTrackView } from './gpsTrackView'
+import { formatTime } from '../format'
+import { getLapStateAt } from '../telemetry/laps'
+import { computeLapSectors, getSectorStateAt } from '../telemetry/sectors'
+import { createTelemetrySampler } from '../telemetry/sampleAt'
+import type { TelemetrySample } from '../types'
 
 function mockCanvas(): Canvas2DLike {
   const noop = (): void => undefined
@@ -71,19 +76,6 @@ function expectNoContentDrawn(ctx: Canvas2DLike): void {
 }
 
 describe('drawWidget GPS availability', () => {
-  it.each(['timer', 'sectorTimer'] as const)('hides live %s timing for an incomplete GPS lap', (type) => {
-    const ctx = mockCanvas()
-    const widget = createWidget(type)
-    if (widget.type === 'timer') widget.style.mode = 'laps'
-    const data = drawContext(true)
-    data.lapState = {
-      currentLapValid: false, lapNumber: 2, currentLapElapsedMs: 5000,
-      lastLapMs: 30000, bestLapMs: 30000, isNewBest: false, history: []
-    }
-    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
-    expectNoContentDrawn(ctx)
-  })
-
   it.each(['speedometerAnalog', 'speedometerDigital', 'elevation', 'distance', 'compass'] as const)(
     'hides %s while the current frame has no trustworthy GPS position',
     (type) => {
@@ -104,6 +96,76 @@ describe('drawWidget GPS availability', () => {
     const ctx = mockCanvas()
     drawWidget(ctx, createWidget('speedometerDigital'), { x: 0, y: 0, w: 400, h: 400 }, drawContext(true))
     expect(ctx.fillText).toHaveBeenCalled()
+  })
+})
+
+describe('drawWidget GPS gap timing', () => {
+  // Lap 1 is a valid 30-second lap. The shorter lap 2 closes inside a GPS gap; lap 3
+  // still contains that gap after GPS returns. Neither can replace lap 1's verified results.
+  const samples: TelemetrySample[] = [
+    ...Array.from({ length: 31 }, (_, i) => i * 1000),
+    ...Array.from({ length: 11 }, (_, i) => 60000 + i * 1000)
+  ].map((cts) => ({ cts, lat: 30 + cts / 1000 * 10 / 111195, lon: 106,
+    altitude: 100, speed2D: 10, speed3D: 10 }))
+  const crossings = [0, 30000, 50000]
+  const boundaries = computeLapSectors(samples, crossings)
+  const sampler = createTelemetrySampler({ samples, videoDurationMs: 70000,
+    deviceName: 'test', gpsStream: 'GPS5', accel: [], gyro: [], gravity: [] })
+  const moments = [
+    { stage: 'during the gap', cts: 40000, elapsedMs: 10000, hasPosition: false },
+    { stage: 'after the next crossing', cts: 55000, elapsedMs: 5000, hasPosition: false },
+    { stage: 'after GPS reacquisition', cts: 65000, elapsedMs: 15000, hasPosition: true }
+  ]
+
+  function timingContext(cts: number): WidgetDrawContext {
+    return {
+      ...drawContext(sampler.hasPositionAt(cts)), cts,
+      lapState: getLapStateAt(crossings, cts, samples),
+      sectorState: getSectorStateAt(boundaries, cts, crossings)
+    }
+  }
+
+  it.each(moments)('keeps verified timing tower history $stage', ({ cts, hasPosition }) => {
+    const data = timingContext(cts)
+    expect(data.hasGpsPosition).toBe(hasPosition)
+    expect(data.lapState?.currentLapValid).toBe(false)
+    expect(data.lapState?.history).toEqual([{ lapNumber: 1, timeMs: 30000, isBest: true }])
+    expect(data.lapState?.bestLapMs).toBe(30000)
+
+    const widget = createWidget('timer')
+    if (widget.type !== 'timer') throw new Error('expected a timer widget')
+    widget.style.mode = 'laps'
+    widget.style.headerText = ''
+    const ctx = mockCanvas()
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    expect(vi.mocked(ctx.fillText).mock.calls.map(([text]) => text)).toEqual(['1', '00:30.00'])
+  })
+
+  it.each(moments)('keeps the sector running clock and last valid row $stage', ({ cts, elapsedMs }) => {
+    const data = timingContext(cts)
+    const state = data.sectorState!
+    expect(data.lapState?.currentLapValid).toBe(false)
+    expect(boundaries.map((boundary) => boundary.lapNumber)).toEqual([1])
+    expect(state.currentSector).toBe(1)
+    expect(state.currentSectorElapsedMs).toBe(elapsedMs)
+    expect(state.currentLapS1Ms).toBeNull()
+    expect(state.currentLapS2Ms).toBeNull()
+    expect(state.isCurrentLapS1Best).toBe(false)
+    expect(state.isCurrentLapS2Best).toBe(false)
+    const last = state.lastLap!
+    expect(last.lapNumber).toBe(1)
+    expect(last.totalMs).toBe(30000)
+    expect([state.bestS1Ms, state.bestS2Ms, state.bestS3Ms]).toEqual([last.s1Ms, last.s2Ms, last.s3Ms])
+
+    const widget = createWidget('sectorTimer')
+    if (widget.type !== 'sectorTimer') throw new Error('expected a sectorTimer widget')
+    widget.style.showLastLapRow = true
+    const ctx = mockCanvas()
+    drawWidget(ctx, widget, { x: 0, y: 0, w: 400, h: 400 }, data)
+    // Sector values are rendered one character at a time to keep digit widths stable.
+    const text = vi.mocked(ctx.fillText).mock.calls.map(([value]) => value).join('')
+    expect(text).toBe(`S1${formatTime(elapsedMs, true)}S2--.--S3--.--` +
+      `S1${formatTime(last.s1Ms, true)}S2${formatTime(last.s2Ms, true)}S3${formatTime(last.s3Ms, true)}`)
   })
 })
 
