@@ -70,7 +70,7 @@ describe('transparent MOV export through bundled FFmpeg', () => {
     expect(args.filter(arg => arg === '-i')).toHaveLength(1)
     expect(args).not.toContain('yuv420p')
     expect(args.join(' ')).toContain('pad=2704:1520:10:20:color=black@0')
-    expect(attemptOutputPath('out.mov', 'job', 1)).toMatch(/\.tmp\.mov$/)
+    expect(attemptOutputPath('out.mov', 'job', 1, 'qtrle')).toMatch(/\.tmp\.mov$/)
     expect(attemptOutputPath('out.mp4', 'job', 1)).toMatch(/\.tmp\.mp4$/)
     expect(() => assertTransparentOutputContainer('out.MOV')).not.toThrow()
     expect(() => assertTransparentOutputContainer('out.mp4')).toThrow('.mov')

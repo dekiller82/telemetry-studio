@@ -99,6 +99,18 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('runExport lifecycle and source protection', () => {
+  it.each([undefined, 'video'] as const)('uses an MP4 attempt for lap.v1 with format=%s and publishes to the chosen name', async format => {
+    const config = options({ outputPath: join(tmpdir(), 'telemetry-lifecycle-lap.v1') })
+    config.settings.format = format
+    await runExport(config)
+    const args = mocks.spawn.mock.calls[0][1] as string[]
+    const tempPath = args.at(-1)!
+    expect(tempPath).toMatch(/\.tmp\.mp4$/)
+    expect(mocks.publish).toHaveBeenCalledExactlyOnceWith(tempPath, config.outputPath,
+      expect.any(String), config.clips.map(clip => clip.video.path), config.signal)
+    expect(source.close).toHaveBeenCalledOnce()
+  })
+
   it.each([2, 3, 4] as const)('submits frames in order with %i workers even when later frames finish first', async (renderWorkers) => {
     const frameCount = renderWorkers * 2 + 1
     const config = options({ trimEndMs: frameCount * 20 })

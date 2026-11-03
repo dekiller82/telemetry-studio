@@ -556,14 +556,16 @@ function App(): React.JSX.Element {
   const [showBestLapExportForm, setShowBestLapExportForm] = useState(false)
   const [bestLapPaddingBeforeSec, setBestLapPaddingBeforeSec] = useState(5)
   const [bestLapPaddingAfterSec, setBestLapPaddingAfterSec] = useState(5)
+  // Share the padded start between the request and the HUD alignment instructions.
+  const bestLapTrimStartMs = fastestLap ? Math.max(0, fastestLap.startCts - bestLapPaddingBeforeSec * 1000) : null
 
   // Exports just the fastest lap (plus configurable padding) as its own clip -- builds a ProjectPayload
   // with an OVERRIDDEN trim range for this one export only, never touching the user's actual saved
   // trim, same "one-shot payload, no mutation" approach as any other export.
   async function handleExportBestLap(): Promise<void> {
-    if (!imported || widgets.length === 0 || !fastestLap) return
+    if (!imported || widgets.length === 0 || !fastestLap || bestLapTrimStartMs === null) return
     const totalDurationMs = imported.telemetry.videoDurationMs
-    const clipTrimStartMs = Math.max(0, fastestLap.startCts - bestLapPaddingBeforeSec * 1000)
+    const clipTrimStartMs = bestLapTrimStartMs
     const clipTrimEndMs = Math.min(totalDurationMs, fastestLap.endCts + bestLapPaddingAfterSec * 1000)
     setShowBestLapExportForm(false)
     setExportEncoderLabel(null)
@@ -766,7 +768,12 @@ function App(): React.JSX.Element {
           </div>
         </header>
         {exportFormat !== 'video' && <div className="export-banner">
-          Transparent HUD only, at source size and frame rate, without audio. Place it above the original video at {formatTime(trimStartMs, true)}. Grade the video separately and keep both layers aligned when cutting or retiming. SDR graphics; check colour management for HDR projects.
+          Transparent HUD only, at source size and frame rate, without audio.{' '}
+          Trim-range export: place it above the original video at {formatTime(trimStartMs, true)}.{' '}
+          {bestLapTrimStartMs !== null && <>
+            Export Best Lap: place it at {formatTime(bestLapTrimStartMs, true)} (lap start minus {bestLapPaddingBeforeSec} s leading padding, clamped to the sequence start).{' '}
+          </>}
+          Grade the video separately and keep both layers aligned when cutting or retiming. SDR graphics; check colour management for HDR projects.
         </div>}
         {exportFormat === 'video' && isVeryHighResSource && exportPresetId === SOURCE_QUALITY_PRESET_ID && referenceVideo && (
           <div className="export-banner export-banner--warning">

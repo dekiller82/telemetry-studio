@@ -737,7 +737,7 @@ export async function runExport(options: RunExportOptions): Promise<void> {
   }
 
   const runAttempt = async (attemptEncoder: VideoEncoder, attemptId: number): Promise<void> => {
-    const tempOutputPath = attemptOutputPath(outputPath, jobId, attemptId)
+    const tempOutputPath = attemptOutputPath(outputPath, jobId, attemptId, settings.format)
     let frameSource: ExportFrameSource | null = null
     try {
       const rendererSetupStartedAtMs = performance.now()
